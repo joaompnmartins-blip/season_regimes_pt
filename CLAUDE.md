@@ -1,0 +1,130 @@
+# CLAUDE.md
+
+Context for Claude Code working in this repository.
+
+## What this is
+
+A prototype that tests one scientific question:
+
+> Does a Portugal-tuned weather-regime classification separate the Iberian
+> extreme-fire circulation (upper ridge over NW Africa + cut-off low west of
+> Portugal) better than the canonical Euro-Atlantic four-regime partition?
+
+It is **not** a fire-probability product. The defensible output is a
+regime-conditioned **odds ratio** — "under regime X, Beira Interior has 2.8×
+baseline odds of a p95 FWI day" — not "38% chance of fire".
+
+Operational context: ICNF / GFR Algarve, sub-seasonal pre-positioning and
+prontidão planning at 2–6 week lead, not tactical forecasting.
+
+## Current state
+
+| | status |
+|---|---|
+| Pipeline code | written, unit-tested (39 assertions) |
+| Synthetic end-to-end validation | passing, 7/7 |
+| Real ERA5 + CEMS run | **not done** — this is the open work |
+
+The synthetic test proves the machinery. It says nothing about the atmosphere.
+
+## Layout
+
+```
+regimes_pt/config.py       domains, seasons, preprocessing defaults
+regimes_pt/download.py     CDS retrieval — ERA5 Z500, CEMS FWI reanalysis
+regimes_pt/preprocess.py   harmonic climatology, detrend, area weight, EOF
+regimes_pt/cluster.py      k-means, classifiability index, assignment, transitions
+regimes_pt/fire_link.py    regionalisation, composites, odds ratios, CV skill
+run_prototype.py           three-step CLI: download | regimes | compare
+tests/test_units.py        invariant tests, no network, ~10 s
+tests/test_synthetic.py    ground-truth end-to-end, no network, ~3 min
+```
+
+## Commands
+
+```bash
+pip install -r requirements.txt
+python tests/test_units.py                                       # always run first
+python tests/test_synthetic.py
+python run_prototype.py --step download
+python run_prototype.py --step regimes --domain canonical_summer --k 4
+python run_prototype.py --step regimes --domain pt_tuned --select-k
+python run_prototype.py --step compare
+```
+
+CDS credentials go in `~/.cdsapirc`, never in the repo.
+
+## Invariants — do not "simplify" these
+
+Each of these looks like an optimisation opportunity and is not. Breaking any of
+them produces output that still looks like weather and is wrong.
+
+1. **Detrend summer Z500.** Thermal expansion of the warming troposphere gives a
+   large positive trend. Left in, k-means returns a cluster that is really
+   "recent years", and regime frequencies show spurious trends. Default removes
+   both the daily area-weighted domain mean and a per-gridpoint linear trend.
+
+2. **Do not whiten the PCs.** Leading PCs carry more physical amplitude and must
+   dominate the distance metric. `StandardScaler` before k-means gives a
+   grid-scale noise EOF the same weight as the NAO. There is a unit test for this.
+
+3. **Area-weight with sqrt(cos lat)** before the EOF step, so Euclidean distance
+   in truncated space approximates area-weighted L2 on the sphere.
+
+4. **Assign by spatial correlation, not Euclidean distance.** Regime membership
+   is about the *shape* of the anomaly, not its amplitude. Days below the
+   correlation threshold get label −1 and stay unclassified. A large unclassified
+   fraction in summer is a real property of the atmosphere, not a bug to fix.
+
+5. **Block bootstrap, never naive.** Regimes persist ~a week; FWI is strongly
+   autocorrelated. Independent-days intervals inflate effective sample size by
+   roughly an order of magnitude. `block_len` should track regime persistence.
+
+6. **Leave-one-year-out for skill.** Never fit exceedance rates on the same year
+   you score. Split by year, not by day — adjacent days are near-duplicates.
+
+7. **Select k by margin over the null, not bare significance.** On real data
+   several k are usually significant at once.
+
+8. **Reuse training climatology when assigning new days.** `project_and_assign`
+   takes the climatology and weights as arguments for this reason. Recomputing
+   them on a short forecast window is silent leakage.
+
+## Known gotchas
+
+- **CDS dataset identifiers drift.** If a request 404s, check the live catalogue
+  and update the constants in `download.py`. Do not assume the code is broken.
+- **ERA5 time coordinate is sometimes `valid_time`**, sometimes `time`, depending
+  on dataset and vintage. `open_z500` handles both; new readers must too.
+- **Geopotential is m²/s², not metres.** `open_z500` divides by g. Composite maps
+  should be in gpm.
+- **CEMS FWI masks ocean as NaN.** Drop all-NaN columns before regionalising or
+  k-means will fail or silently cluster the mask.
+- **Z500 and FWI calendars must be intersected**, not assumed aligned — different
+  products, different leap-day and time-zone handling. `step_compare` does this.
+- **Memory.** 46 JJAS seasons of 1° Z500 over the canonical domain is fine in
+  RAM; 0.25° is not. Do not raise the grid resolution without a chunking plan.
+  Regime patterns are planetary scale — 1° is ample.
+
+## Conventions
+
+- Plain numpy in the numerical core so it stays testable without network or files;
+  xarray only at the I/O boundary (`prepare_from_dataarray`, `open_z500`).
+- Every new statistical claim gets a unit test pinning the property, not just the
+  return type.
+- Docstrings explain *why* a choice was made where the choice is non-obvious.
+  Keep that — it is the difference between a defensible method and a black box.
+- Comments and identifiers in English; user-facing operational output may be
+  Portuguese.
+
+## What is deliberately not built
+
+- **Layer 2, regime → burned area.** Needs the ICNF fire database. Expect it to be
+  much weaker: most variance in Portuguese fire outcomes is ignition and
+  suppression, not meteorology. Keep it visibly separate so ignition noise does
+  not contaminate the S2S signal.
+- **Live forecast path.** Hindcast only. Would need licensed ECMWF regime
+  probabilities, or a GEFS/IFS open-data Z500 pull projected onto fitted
+  centroids via `cluster.project_and_assign`.
+- **Plotting.** No cartopy dependency yet. Composite maps are the obvious next
+  addition.

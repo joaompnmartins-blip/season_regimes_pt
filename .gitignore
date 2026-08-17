@@ -1,0 +1,27 @@
+# CDS credentials. Never commit: the file carries a personal API key.
+.cdsapirc
+
+# Retrieved data and fitted results. ERA5/CEMS archives run to many GB and are
+# reproducible from run_prototype.py --step download, so they stay out of git.
+data/
+out/
+*.nc
+*.nc4
+*.grib
+*.grb
+*.pkl
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

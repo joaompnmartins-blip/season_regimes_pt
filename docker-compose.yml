@@ -1,0 +1,21 @@
+services:
+  regimes:
+    build:
+      context: .
+      args:
+        # Override with `UID=$(id -u) GID=$(id -g) docker compose build` if your
+        # host account is not 1000:1000.
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: seasonregimes-pt:local
+    working_dir: /app
+    volumes:
+      # Downloaded ERA5 Z500 and CEMS FWI reanalysis.
+      - ./data:/app/data
+      # Fitted regimes, pickled state, comparison tables.
+      - ./out:/app/out
+      # CDS credentials, read-only and never baked into the image.
+      # This file must already exist on the host or Docker will create a
+      # directory in its place and cdsapi will fail with a confusing error.
+      - ${HOME}/.cdsapirc:/home/regimes/.cdsapirc:ro
+    command: ["python", "run_prototype.py", "--help"]

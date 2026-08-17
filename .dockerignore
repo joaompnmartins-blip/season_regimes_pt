@@ -1,0 +1,26 @@
+# Credentials must never enter the build context, let alone an image layer.
+# They are bind-mounted read-only at run time instead.
+.cdsapirc
+
+# Data and results are volumes, not build inputs. ERA5/CEMS files are large
+# enough that copying them would dominate build time.
+data/
+out/
+*.nc
+*.nc4
+*.grib
+*.grb
+*.zip
+*.pkl
+
+# Local environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+.git/
+.gitignore
