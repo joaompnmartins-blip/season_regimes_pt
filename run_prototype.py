@@ -179,9 +179,22 @@ def main():
     ap.add_argument("--percentile", type=float, default=95.0)
     ap.add_argument("--data-dir", default="./data")
     ap.add_argument("--out-dir", default="./out")
+    # Narrowing the year range is the only cheap way to test a CDS request
+    # before committing to the full 1980-2025 pull: 46 years x 2 datasets is
+    # ~92 queued requests. Retrieval is idempotent - download_z500 and
+    # download_fwi skip files that already exist - so a one-year smoke test
+    # costs nothing and its output is reused by the full run.
+    ap.add_argument("--year-start", type=int, default=None)
+    ap.add_argument("--year-end", type=int, default=None)
     args = ap.parse_args()
 
-    cfg = RunConfig(data_dir=args.data_dir, out_dir=args.out_dir)
+    years = {
+        name: value
+        for name, value in (("year_start", args.year_start),
+                            ("year_end", args.year_end))
+        if value is not None
+    }
+    cfg = RunConfig(data_dir=args.data_dir, out_dir=args.out_dir, **years)
     os.makedirs(cfg.out_dir, exist_ok=True)
     {"download": step_download, "regimes": step_regimes,
      "compare": step_compare}[args.step](cfg, args)
