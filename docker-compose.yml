@@ -19,3 +19,18 @@ services:
       # directory in its place and cdsapi will fail with a confusing error.
       - ${HOME}/.cdsapirc:/home/regimes/.cdsapirc:ro
     command: ["python", "run_prototype.py", "--help"]
+
+  # Same image and environment, but with the working tree mounted over /app so
+  # code edits take effect immediately. Use this while iterating - notably when
+  # correcting drifted CDS dataset identifiers in regimes_pt/download.py, where
+  # rebuilding the image between one-line changes is pure overhead.
+  #
+  # Prefer the `regimes` service for anything whose result you intend to report:
+  # it runs the code baked into the image, so the run is reproducible from the
+  # image alone rather than depending on your uncommitted working tree.
+  dev:
+    extends:
+      service: regimes
+    volumes:
+      - .:/app
+      - ${HOME}/.cdsapirc:/home/regimes/.cdsapirc:ro
