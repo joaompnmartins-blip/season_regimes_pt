@@ -12,23 +12,65 @@ rather than assuming the code is broken.
 from __future__ import annotations
 
 import os
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 from .config import Domain, RunConfig, SEASONS
+
+# Two datastores, not one. ERA5 is on the CDS; the CEMS fire datasets were
+# migrated to the Early Warning Data Store and are no longer served from the CDS
+# at all - requesting cems-fire-historical-v1 there returns 404 "process not
+# found", which reads like a drifted identifier but is a moved host.
+#
+# Verified 2026-08-17 against the live process endpoints of both stores.
+CDS_URL = "https://cds.climate.copernicus.eu/api"
+EWDS_URL = "https://ewds.climate.copernicus.eu/api"
 
 ERA5_PL_DAILY = "derived-era5-pressure-levels-daily-statistics"
 ERA5_PL_HOURLY = "reanalysis-era5-pressure-levels"
 CEMS_FIRE = "cems-fire-historical-v1"
 
 
-def _client():
+def _client(url: Optional[str] = None):
+    """A cdsapi client, optionally pinned to a datastore other than the default.
+
+    ~/.cdsapirc holds a single url/key pair, which covers the CDS only. EWDS is
+    a separate store with its own licence acceptances; ECMWF single sign-on
+    means the same token usually works for both, so the key from ~/.cdsapirc is
+    reused unless EWDS_KEY overrides it.
+    """
     try:
         import cdsapi
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "cdsapi not installed. `pip install cdsapi` and create ~/.cdsapirc"
         ) from exc
-    return cdsapi.Client()
+
+    if url is None:
+        return cdsapi.Client()
+
+    key = os.environ.get("EWDS_KEY") or cdsapi.Client().key
+    return cdsapi.Client(url=url, key=key)
+
+
+def _retrieve(client, dataset: str, request: dict, path: str) -> None:
+    """Retrieve, translating a 404 into the datastore-split explanation.
+
+    A bare 404 here is genuinely ambiguous - the identifier may have drifted, or
+    the dataset may have moved store entirely - and the two have different fixes.
+    """
+    try:
+        client.retrieve(dataset, request, path)
+    except Exception as exc:
+        text = str(exc)
+        if "404" in text or "not found" in text.lower():
+            raise RuntimeError(
+                f"{dataset!r} not found on {getattr(client, 'url', 'the default store')}.\n"
+                f"CEMS datasets live on the EWDS ({EWDS_URL}), ERA5 on the CDS\n"
+                f"({CDS_URL}). If the host is right, the identifier has drifted:\n"
+                "check the live catalogue and update the constants at the top of\n"
+                "this module rather than assuming the code is broken."
+            ) from exc
+        raise
 
 
 def _months(season: str) -> Sequence[str]:
@@ -42,14 +84,17 @@ def _days() -> Sequence[str]:
 def download_z500(
     cfg: RunConfig,
     domain: Domain,
-    grid: float = 1.0,
     use_daily_product: bool = True,
 ) -> list[str]:
     """Download daily-mean geopotential at `cfg.level` hPa, one file per year.
 
-    A 1.0 deg grid is ample for regime work: the patterns are planetary scale and
-    a coarser grid substantially reduces both download volume and the dimension
-    fed to the EOF step. Returns the list of written paths.
+    No server-side regridding: CADS accepts no `grid` key for either ERA5
+    pressure-level dataset (verified against both process schemas), so files
+    arrive at native 0.25 deg. Coarsening to the 1 deg working grid happens at
+    read time in `open_z500` - which matters, because 46 seasons of 0.25 deg
+    Z500 over the canonical domain does not fit in RAM.
+
+    Returns the list of written paths.
     """
     c = _client()
     os.makedirs(cfg.data_dir, exist_ok=True)
@@ -75,7 +120,6 @@ def download_z500(
                 "time_zone": "utc+00:00",
                 "frequency": "1_hourly",
                 "area": domain.cds_area,
-                "grid": [grid, grid],
             }
             dataset = ERA5_PL_DAILY
         else:
@@ -89,12 +133,13 @@ def download_z500(
                 "day": _days(),
                 "time": ["00:00", "06:00", "12:00", "18:00"],
                 "area": domain.cds_area,
-                "grid": [grid, grid],
-                "format": "netcdf",
+                # CADS renamed the legacy `format` key; this dataset takes
+                # `data_format` and rejects `format`.
+                "data_format": "netcdf",
             }
             dataset = ERA5_PL_HOURLY
 
-        c.retrieve(dataset, request, path)
+        _retrieve(c, dataset, request, path)
         paths.append(path)
 
     return paths
@@ -107,10 +152,14 @@ def download_fwi(
 ) -> list[str]:
     """Download CEMS ERA5-based FWI reanalysis over mainland Portugal.
 
+    Served from the EWDS, not the CDS. That store needs its own licence
+    acceptance for this dataset - accepting the ERA5 licence on the CDS does
+    not carry over, and the failure is a 403 at request time, not at login.
+
     The default box is deliberately a little larger than the coastline so that
     coastal grid points are not half-masked. Returns written paths.
     """
-    c = _client()
+    c = _client(EWDS_URL)
     os.makedirs(cfg.data_dir, exist_ok=True)
     paths = []
 
@@ -128,21 +177,51 @@ def download_fwi(
             "year": [str(year)],
             "month": _months(cfg.season),
             "day": _days(),
-            "grid": ["0.25", "0.25"],
+            # Enum of strings on this dataset - '0.5/0.5' | '0.25/0.25' |
+            # 'original_grid'. A ["0.25", "0.25"] pair is rejected.
+            "grid": "0.25/0.25",
             "area": list(area),
             "data_format": "netcdf",
         }
-        c.retrieve(CEMS_FIRE, request, path)
+        _retrieve(c, CEMS_FIRE, request, path)
         paths.append(path)
 
     return paths
 
 
-def open_z500(paths: Sequence[str], level: int = 500):
+def _coarsen_to(da, target_grid: float):
+    """Block-average from the native grid onto a `target_grid`-degree grid.
+
+    Block mean rather than interpolation: regime patterns are planetary scale,
+    so the area-mean of a block is the physically meaningful reduction, whereas
+    subsampling would alias the sub-synoptic detail we are discarding on purpose.
+
+    Applied lazily, before `.load()`, so the native-resolution array is never
+    fully realised in memory - the point of the exercise.
+    """
+    lat = "latitude" if "latitude" in da.dims else "lat"
+    lon = "longitude" if "longitude" in da.dims else "lon"
+    if da[lat].size < 2:
+        return da
+
+    native = abs(float(da[lat][1] - da[lat][0]))
+    factor = int(round(target_grid / native))
+    if factor <= 1:
+        return da
+    return da.coarsen({lat: factor, lon: factor}, boundary="trim").mean()
+
+
+def open_z500(paths: Sequence[str], level: int = 500,
+              target_grid: Optional[float] = 1.0):
     """Open a multi-year Z500 archive as an (time, lat, lon) DataArray in gpm.
 
     ERA5 stores geopotential in m2 s-2; divided by g here so that composite maps
     are in geopotential metres, which is what everyone reads.
+
+    `target_grid` defaults to 1 deg because CADS no longer regrids server-side
+    and the files arrive at native 0.25 deg. Pass None to keep native
+    resolution, but note that 46 seasons of 0.25 deg Z500 over the canonical
+    domain will not fit in RAM - 1 deg is ample for planetary-scale regimes.
     """
     import xarray as xr
 
@@ -162,5 +241,8 @@ def open_z500(paths: Sequence[str], level: int = 500):
         da = da.groupby("time.date").mean("time")
         da = da.rename({"date": "time"})
         da = da.assign_coords(time=[str(v) for v in da.time.values]).astype("float32")
+
+    if target_grid is not None:
+        da = _coarsen_to(da, target_grid)
 
     return (da / 9.80665).rename("z500_gpm").load()

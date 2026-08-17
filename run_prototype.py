@@ -30,19 +30,19 @@ def _regime_state_path(cfg, domain, k):
 def step_download(cfg: RunConfig, args):
     for name in ("canonical_summer", "pt_tuned"):
         print(f"[{name}] Z500 ...")
-        download.download_z500(cfg, DOMAINS[name], grid=args.grid)
+        download.download_z500(cfg, DOMAINS[name])
     print("[FWI] CEMS reanalysis over mainland Portugal ...")
     download.download_fwi(cfg)
     print("done")
 
 
-def _load_prepared(cfg: RunConfig, domain: str):
+def _load_prepared(cfg: RunConfig, domain: str, target_grid: float = 1.0):
     import glob
     paths = sorted(glob.glob(os.path.join(
         cfg.data_dir, f"z{cfg.level}_{domain}_{cfg.season}_*.nc")))
     if not paths:
         raise FileNotFoundError(f"no Z500 files for domain '{domain}' - run --step download")
-    da = download.open_z500(paths, level=cfg.level)
+    da = download.open_z500(paths, level=cfg.level, target_grid=target_grid)
     p = cfg.preproc
     return preprocess.prepare_from_dataarray(
         da, n_harmonics=p.n_harmonics, detrend=p.detrend,
@@ -53,7 +53,7 @@ def _load_prepared(cfg: RunConfig, domain: str):
 
 def step_regimes(cfg: RunConfig, args):
     os.makedirs(cfg.out_dir, exist_ok=True)
-    prep = _load_prepared(cfg, args.domain)
+    prep = _load_prepared(cfg, args.domain, args.grid)
     print(f"{args.domain}: {prep.anom.shape[0]} days, "
           f"{prep.eof.n_eof} EOFs ({100*prep.eof.explained.sum():.1f}% variance)")
 

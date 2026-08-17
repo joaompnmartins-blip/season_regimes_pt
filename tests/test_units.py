@@ -259,6 +259,55 @@ def _raises(fn, *args) -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# regridding (I/O boundary)
+# ---------------------------------------------------------------------------
+
+def test_regrid():
+    """CADS stopped accepting a server-side `grid` key, so the 0.25 -> 1 deg
+    reduction moved into open_z500. It has to stay a block mean: subsampling
+    would alias the sub-synoptic detail we are deliberately discarding, and the
+    failure would be silent - the maps would still look like weather.
+
+    Skipped rather than failed without xarray, so the numerical core stays
+    testable with no I/O stack installed.
+    """
+    print("\nregrid")
+    try:
+        import xarray as xr
+    except ImportError:
+        print("  [SKIP] xarray not installed")
+        return
+
+    from regimes_pt.download import _coarsen_to
+
+    lat = np.arange(55.0, 24.9, -0.25)
+    lon = np.arange(-40.0, 10.01, 0.25)
+    da = xr.DataArray(
+        RNG.normal(size=(3, lat.size, lon.size)),
+        dims=("time", "latitude", "longitude"),
+        coords={"time": [1, 2, 3], "latitude": lat, "longitude": lon},
+    )
+
+    c = _coarsen_to(da, 1.0)
+    spacing = abs(float(c.latitude[1] - c.latitude[0]))
+    check("coarsens to target spacing", abs(spacing - 1.0) < 1e-9,
+          f"{spacing:.3f} deg")
+    check("16x fewer points at 0.25->1 deg", da.size // c.size == 16,
+          f"{da.size} -> {c.size}")
+
+    # Block mean, not a subsample: the first output cell must equal the mean of
+    # the 4x4 native block it covers.
+    manual = float(da.isel(time=0, latitude=slice(0, 4), longitude=slice(0, 4)).mean())
+    got = float(c.isel(time=0, latitude=0, longitude=0))
+    check("output cell is the block mean", abs(manual - got) < 1e-10,
+          f"{got:.6f} vs {manual:.6f}")
+
+    check("no NaN introduced", bool(np.isfinite(c).all()))
+    check("no-op when target is finer than native",
+          _coarsen_to(da, 0.25).shape == da.shape)
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -266,6 +315,7 @@ def main() -> int:
     test_preprocess()
     test_cluster()
     test_fire_link()
+    test_regrid()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))
