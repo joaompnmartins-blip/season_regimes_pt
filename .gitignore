@@ -3,8 +3,16 @@
 
 # Retrieved data and fitted results. ERA5/CEMS archives run to many GB and are
 # reproducible from run_prototype.py --step download, so they stay out of git.
-data/
-out/
+# Tracked as empty directories, via .gitkeep below. If they do not exist when
+# compose starts, Docker creates them itself and the container user cannot
+# write to the result - the download then fails after the retrieval succeeds,
+# which is an expensive way to find out. Note `data/*` rather than `data/`:
+# git will not descend into an ignored directory, so the negation below only
+# works if the directory itself is not the thing being ignored.
+data/*
+out/*
+!data/.gitkeep
+!out/.gitkeep
 *.nc
 *.nc4
 *.grib
