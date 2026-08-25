@@ -97,22 +97,11 @@ def step_regimes(cfg: RunConfig, args):
 
 def _load_fwi(cfg: RunConfig):
     import glob
-    import xarray as xr
-    import pandas as pd
 
     paths = sorted(glob.glob(os.path.join(cfg.data_dir, f"fwi_pt_{cfg.season}_*.nc")))
     if not paths:
         raise FileNotFoundError("no FWI files - run --step download")
-    ds = xr.open_mfdataset(paths, combine="by_coords")
-    da = ds[list(ds.data_vars)[0]].load()
-    lat_n = "latitude" if "latitude" in da.dims else "lat"
-    lon_n = "longitude" if "longitude" in da.dims else "lon"
-    da = da.transpose("time", lat_n, lon_n)
-
-    v = da.values.reshape(da.shape[0], -1)
-    land = ~np.isnan(v).any(axis=0)          # ocean points are masked in CEMS
-    t = pd.to_datetime(da["time"].values)
-    return v[:, land], t
+    return download.open_fwi(paths)
 
 
 def step_compare(cfg: RunConfig, args):

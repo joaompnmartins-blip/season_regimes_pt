@@ -189,6 +189,18 @@ def download_fwi(
     return paths
 
 
+def _rename_time(da):
+    """Normalise the time coordinate to `time`.
+
+    Copernicus products disagree: some carry `valid_time`, some `time`,
+    depending on dataset and vintage. Every reader must handle both - assuming
+    one is how a reader works on ERA5 and then dies on CEMS.
+    """
+    if "valid_time" in da.dims or "valid_time" in da.coords:
+        da = da.rename({"valid_time": "time"})
+    return da
+
+
 def _coarsen_to(da, target_grid: float):
     """Block-average from the native grid onto a `target_grid`-degree grid.
 
@@ -235,8 +247,7 @@ def open_z500(paths: Sequence[str], level: int = 500,
         da = da.sel(level=level, drop=True)
 
     # Average sub-daily samples if the hourly fallback was used.
-    if "valid_time" in da.dims:
-        da = da.rename({"valid_time": "time"})
+    da = _rename_time(da)
     if da.time.size and len(set(da.time.dt.floor("D").values)) < da.time.size:
         da = da.groupby("time.date").mean("time")
         da = da.rename({"date": "time"})
@@ -246,3 +257,30 @@ def open_z500(paths: Sequence[str], level: int = 500,
         da = _coarsen_to(da, target_grid)
 
     return (da / 9.80665).rename("z500_gpm").load()
+
+
+def open_fwi(paths: Sequence[str]):
+    """Open the CEMS FWI archive as (values[time, land_point], times).
+
+    Returns numpy rather than a DataArray because everything downstream in
+    fire_link is numpy, and the ocean mask has to be resolved here in any case:
+    CEMS masks sea points as NaN, and k-means would otherwise cluster the mask
+    rather than the fire climate.
+
+    Note the variable is named `fwinx`, not `fire_weather_index` as requested -
+    hence taking the sole data variable rather than looking one up by name.
+    """
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    ds = xr.open_mfdataset(paths, combine="by_coords")
+    da = _rename_time(ds[list(ds.data_vars)[0]]).load()
+
+    lat = "latitude" if "latitude" in da.dims else "lat"
+    lon = "longitude" if "longitude" in da.dims else "lon"
+    da = da.transpose("time", lat, lon)
+
+    values = da.values.reshape(da.shape[0], -1)
+    land = ~np.isnan(values).any(axis=0)
+    return values[:, land], pd.to_datetime(da["time"].values)

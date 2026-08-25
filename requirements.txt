@@ -7,6 +7,11 @@ pandas>=2.0
 # I/O boundary (required for the real ERA5 + CEMS run)
 xarray>=2023.1
 netCDF4>=1.6
+# open_mfdataset opens files chunked, which xarray delegates to dask. Without
+# it every multi-year read raises ImportError, and the lazy coarsening in
+# open_z500 - which is what keeps native 0.25 deg Z500 out of RAM - has nothing
+# to defer through.
+dask>=2023.1
 
 # CDS retrieval (Stage 3 onward; needs ~/.cdsapirc)
 cdsapi>=0.7
