@@ -308,6 +308,45 @@ def test_regrid():
           _coarsen_to(da, 0.25).shape == da.shape)
 
 
+# ---------------------------------------------------------------------------
+# download planning (no network)
+# ---------------------------------------------------------------------------
+
+def test_download_plan():
+    """Which years get requested is pure bookkeeping, but getting it wrong is
+    expensive and quiet: skip a year that is missing and the archive has a hole
+    no later step reports; refetch one that is present and an overnight run
+    wastes a queue slot per mistake.
+    """
+    print("\ndownload plan")
+    import os
+    import tempfile
+
+    from regimes_pt.download import _chunk, _years_on_disk
+
+    with tempfile.TemporaryDirectory() as d:
+        for fname in ("z500_pt_tuned_JJAS_2003.nc",
+                      "z500_pt_tuned_JJAS_1980-1989.nc",
+                      "z500_pt_tuned_JJAS_notayear.nc"):
+            open(os.path.join(d, fname), "w").close()
+        found = _years_on_disk(os.path.join(d, "z500_pt_tuned_JJAS_*.nc"))
+
+    check("single-year filename parsed", 2003 in found)
+    check("year-range filename expanded", found.issuperset(range(1980, 1990)),
+          f"{len(found & set(range(1980, 1990)))}/10 of 1980-1989")
+    check("range is inclusive of its end", 1989 in found)
+    check("unparseable filename ignored", 1990 not in found and 2004 not in found)
+
+    # Chunking must partition exactly - no dropped or duplicated years.
+    want = [y for y in range(1980, 2026) if y not in found]
+    chunks = list(_chunk(want, 10))
+    flat = [y for c in chunks for y in c]
+    check("chunks partition the wanted years", flat == want,
+          f"{len(chunks)} chunks, {len(flat)} years")
+    check("no chunk exceeds the request size", all(len(c) <= 10 for c in chunks))
+    check("already-present years excluded", 2003 not in flat and 1985 not in flat)
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -316,6 +355,7 @@ def main() -> int:
     test_cluster()
     test_fire_link()
     test_regrid()
+    test_download_plan()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

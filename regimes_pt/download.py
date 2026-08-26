@@ -11,7 +11,10 @@ rather than assuming the code is broken.
 
 from __future__ import annotations
 
+import concurrent.futures as cf
+import glob
 import os
+import re
 from typing import Iterable, Optional, Sequence
 
 from .config import Domain, RunConfig, SEASONS
@@ -73,6 +76,75 @@ def _retrieve(client, dataset: str, request: dict, path: str) -> None:
         raise
 
 
+# One request per year is the slow way to do this. Queue wait dominates and is
+# paid per request: the 2003 smoke test spent 43 of its 47 minutes queued and
+# only 4 processing. Grouping years collapses that fixed cost, which is also
+# ECMWF's own guidance - fewer, larger requests.
+#
+# 10 years x 4 months x 31 days x 1 level is ~1240 fields, comfortably inside
+# the per-request limits. Raise it and you trade failure granularity for fewer
+# queue waits: a rejected 46-year request loses everything, a rejected 10-year
+# one loses a chunk.
+YEARS_PER_REQUEST = 10
+
+# Kept small on purpose. CDS caps concurrent requests per user and throttles or
+# rejects beyond it, so this overlaps queue waits without looking like abuse.
+MAX_WORKERS = 3
+
+_YEARS_IN_NAME = re.compile(r"_(\d{4})(?:-(\d{4}))?\.nc$")
+
+
+def _years_on_disk(pattern: str) -> set:
+    """Years already retrieved, parsed from filenames.
+
+    Coverage is tracked by filename rather than by opening files, so resuming an
+    interrupted run costs no I/O. Both `_2003.nc` and `_1980-1989.nc` count.
+    """
+    years = set()
+    for path in glob.glob(pattern):
+        m = _YEARS_IN_NAME.search(os.path.basename(path))
+        if m:
+            first = int(m.group(1))
+            years.update(range(first, int(m.group(2) or first) + 1))
+    return years
+
+
+def _chunk(seq: Sequence[int], size: int):
+    for i in range(0, len(seq), size):
+        yield list(seq[i:i + size])
+
+
+def _run_one(job) -> None:
+    """Retrieve one request, writing through a .part file.
+
+    An interrupted overnight run must not leave a truncated file behind: file
+    existence is the resume mechanism, so a partial write would be silently
+    treated as complete and poison the archive.
+    """
+    url, dataset, request, path = job
+    tmp = path + ".part"
+    _retrieve(_client(url), dataset, request, tmp)
+    os.replace(tmp, path)
+
+
+def _run_jobs(jobs: list, max_workers: int = MAX_WORKERS) -> None:
+    """Submit retrievals concurrently, since queue wait overlaps.
+
+    A client per job rather than one shared: cdsapi holds per-request state and
+    is not documented as thread-safe.
+    """
+    if not jobs:
+        return
+    if len(jobs) == 1:
+        _run_one(jobs[0])
+        return
+
+    with cf.ThreadPoolExecutor(max_workers=min(max_workers, len(jobs))) as ex:
+        futures = [ex.submit(_run_one, job) for job in jobs]
+        for future in cf.as_completed(futures):
+            future.result()   # re-raise the first failure, with its traceback
+
+
 def _months(season: str) -> Sequence[str]:
     return [f"{m:02d}" for m in SEASONS[season]]
 
@@ -85,8 +157,15 @@ def download_z500(
     cfg: RunConfig,
     domain: Domain,
     use_daily_product: bool = True,
+    years_per_request: int = YEARS_PER_REQUEST,
+    max_workers: int = MAX_WORKERS,
 ) -> list[str]:
-    """Download daily-mean geopotential at `cfg.level` hPa, one file per year.
+    """Download daily-mean geopotential at `cfg.level` hPa.
+
+    Years are grouped `years_per_request` at a time and the resulting requests
+    submitted concurrently, because CDS queue wait is per request and dominates
+    the total. Years already covered by a file on disk are skipped, so an
+    interrupted run resumes without refetching.
 
     No server-side regridding: CADS accepts no `grid` key for either ERA5
     pressure-level dataset (verified against both process schemas), so files
@@ -94,26 +173,26 @@ def download_z500(
     read time in `open_z500` - which matters, because 46 seasons of 0.25 deg
     Z500 over the canonical domain does not fit in RAM.
 
-    Returns the list of written paths.
+    Returns every path for this domain and season, old and new.
     """
-    c = _client()
     os.makedirs(cfg.data_dir, exist_ok=True)
-    paths = []
+    stem = f"z{cfg.level}_{domain.name}_{cfg.season}"
+    pattern = os.path.join(cfg.data_dir, f"{stem}_*.nc")
 
-    for year in range(cfg.year_start, cfg.year_end + 1):
-        path = os.path.join(
-            cfg.data_dir, f"z{cfg.level}_{domain.name}_{cfg.season}_{year}.nc"
-        )
-        if os.path.exists(path):
-            paths.append(path)
-            continue
+    have = _years_on_disk(pattern)
+    want = [y for y in range(cfg.year_start, cfg.year_end + 1) if y not in have]
+
+    jobs = []
+    for years in _chunk(want, years_per_request):
+        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
+        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
 
         if use_daily_product:
             request = {
                 "product_type": "reanalysis",
                 "variable": [cfg.variable],
                 "pressure_level": [str(cfg.level)],
-                "year": [str(year)],
+                "year": [str(y) for y in years],
                 "month": _months(cfg.season),
                 "day": _days(),
                 "daily_statistic": "daily_mean",
@@ -128,7 +207,7 @@ def download_z500(
                 "product_type": "reanalysis",
                 "variable": [cfg.variable],
                 "pressure_level": [str(cfg.level)],
-                "year": [str(year)],
+                "year": [str(y) for y in years],
                 "month": _months(cfg.season),
                 "day": _days(),
                 "time": ["00:00", "06:00", "12:00", "18:00"],
@@ -139,16 +218,18 @@ def download_z500(
             }
             dataset = ERA5_PL_HOURLY
 
-        _retrieve(c, dataset, request, path)
-        paths.append(path)
+        jobs.append((None, dataset, request, path))
 
-    return paths
+    _run_jobs(jobs, max_workers)
+    return sorted(glob.glob(pattern))
 
 
 def download_fwi(
     cfg: RunConfig,
     area: Sequence[float] = (42.5, -10.0, 36.5, -6.0),  # N, W, S, E - mainland PT
     variables: Iterable[str] = ("fire_weather_index",),
+    years_per_request: int = YEARS_PER_REQUEST,
+    max_workers: int = MAX_WORKERS,
 ) -> list[str]:
     """Download CEMS ERA5-based FWI reanalysis over mainland Portugal.
 
@@ -159,22 +240,24 @@ def download_fwi(
     The default box is deliberately a little larger than the coastline so that
     coastal grid points are not half-masked. Returns written paths.
     """
-    c = _client(EWDS_URL)
     os.makedirs(cfg.data_dir, exist_ok=True)
-    paths = []
+    stem = f"fwi_pt_{cfg.season}"
+    pattern = os.path.join(cfg.data_dir, f"{stem}_*.nc")
 
-    for year in range(cfg.year_start, cfg.year_end + 1):
-        path = os.path.join(cfg.data_dir, f"fwi_pt_{cfg.season}_{year}.nc")
-        if os.path.exists(path):
-            paths.append(path)
-            continue
+    have = _years_on_disk(pattern)
+    want = [y for y in range(cfg.year_start, cfg.year_end + 1) if y not in have]
+
+    jobs = []
+    for years in _chunk(want, years_per_request):
+        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
+        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
 
         request = {
             "product_type": "reanalysis",
             "variable": list(variables),
             "dataset_type": "consolidated_dataset",
             "system_version": "4_1",
-            "year": [str(year)],
+            "year": [str(y) for y in years],
             "month": _months(cfg.season),
             "day": _days(),
             # Enum of strings on this dataset - '0.5/0.5' | '0.25/0.25' |
@@ -183,10 +266,10 @@ def download_fwi(
             "area": list(area),
             "data_format": "netcdf",
         }
-        _retrieve(c, CEMS_FIRE, request, path)
-        paths.append(path)
+        jobs.append((EWDS_URL, CEMS_FIRE, request, path))
 
-    return paths
+    _run_jobs(jobs, max_workers)
+    return sorted(glob.glob(pattern))
 
 
 def _rename_time(da):
