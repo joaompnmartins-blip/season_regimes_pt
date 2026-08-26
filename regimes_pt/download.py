@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import glob
+import json
 import os
 import re
+import urllib.request
 from typing import Iterable, Optional, Sequence
 
 from .config import Domain, RunConfig, SEASONS
@@ -85,7 +87,13 @@ def _retrieve(client, dataset: str, request: dict, path: str) -> None:
 # the per-request limits. Raise it and you trade failure granularity for fewer
 # queue waits: a rejected 46-year request loses everything, a rejected 10-year
 # one loses a chunk.
-YEARS_PER_REQUEST = 10
+# Fallbacks only - the real ceiling is read from the costing endpoint at run
+# time by _years_per_request(). Measured 2026-08-26: cost is one unit per
+# retrieved day, so a JJAS year costs 122 on both stores, but the ceiling is
+# 400 on the CDS (3 JJAS years) and 3720 on the EWDS (30). A single constant
+# would either overrun one store or starve the other by an order of magnitude.
+YEARS_PER_REQUEST_CDS = 3
+YEARS_PER_REQUEST_EWDS = 30
 
 # Kept small on purpose. CDS caps concurrent requests per user and throttles or
 # rejects beyond it, so this overlaps queue waits without looking like abuse.
@@ -107,6 +115,35 @@ def _years_on_disk(pattern: str) -> set:
             first = int(m.group(1))
             years.update(range(first, int(m.group(2) or first) + 1))
     return years
+
+
+def _years_per_request(url: Optional[str], dataset: str,
+                       one_year_request: dict, fallback: int) -> int:
+    """Ask CADS how many years fit in one request, from a one-year probe.
+
+    Request size is capped by a per-dataset "cost" limit, and exceeding it is a
+    403 at submission - cheap to hit, but it fails the whole chunk. The limits
+    are not published in the process schema and differ by store, so they are
+    measured rather than assumed: cost scales linearly with the number of
+    retrieved days, so limit // cost_of_one_year is the answer.
+
+    Falls back to a measured constant if the endpoint is unreachable; being
+    wrong here costs a retry, not correctness.
+    """
+    endpoint = (f"{url or CDS_URL}/retrieve/v1/processes/{dataset}"
+                "/costing?request_origin=api")
+    try:
+        body = json.dumps({"inputs": one_year_request}).encode()
+        req = urllib.request.Request(
+            endpoint, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as fh:
+            costing = json.load(fh)
+        cost, limit = float(costing["cost"]), float(costing["limit"])
+        if cost > 0:
+            return max(1, int(limit // cost))
+    except Exception:
+        pass          # network, schema change, auth - all mean "use the default"
+    return fallback
 
 
 def _chunk(seq: Sequence[int], size: int):
@@ -157,15 +194,16 @@ def download_z500(
     cfg: RunConfig,
     domain: Domain,
     use_daily_product: bool = True,
-    years_per_request: int = YEARS_PER_REQUEST,
+    years_per_request: Optional[int] = None,
     max_workers: int = MAX_WORKERS,
 ) -> list[str]:
     """Download daily-mean geopotential at `cfg.level` hPa.
 
-    Years are grouped `years_per_request` at a time and the resulting requests
-    submitted concurrently, because CDS queue wait is per request and dominates
-    the total. Years already covered by a file on disk are skipped, so an
-    interrupted run resumes without refetching.
+    Years are grouped as many to a request as the dataset's cost limit allows
+    (queried at run time; pass `years_per_request` to override) and the
+    resulting requests submitted concurrently, because CDS queue wait is per
+    request and dominates the total. Years already covered by a file on disk
+    are skipped, so an interrupted run resumes without refetching.
 
     No server-side regridding: CADS accepts no `grid` key for either ERA5
     pressure-level dataset (verified against both process schemas), so files
@@ -182,11 +220,10 @@ def download_z500(
     have = _years_on_disk(pattern)
     want = [y for y in range(cfg.year_start, cfg.year_end + 1) if y not in have]
 
-    jobs = []
-    for years in _chunk(want, years_per_request):
-        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
-        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
+    if not want:
+        return sorted(glob.glob(pattern))
 
+    def build(years):
         if use_daily_product:
             request = {
                 "product_type": "reanalysis",
@@ -217,8 +254,17 @@ def download_z500(
                 "data_format": "netcdf",
             }
             dataset = ERA5_PL_HOURLY
+        return dataset, request
 
-        jobs.append((None, dataset, request, path))
+    dataset, _probe = build(want[:1])
+    per = years_per_request or _years_per_request(
+        None, dataset, _probe, YEARS_PER_REQUEST_CDS)
+
+    jobs = []
+    for years in _chunk(want, per):
+        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
+        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
+        jobs.append((None, dataset, build(years)[1], path))
 
     _run_jobs(jobs, max_workers)
     return sorted(glob.glob(pattern))
@@ -228,7 +274,7 @@ def download_fwi(
     cfg: RunConfig,
     area: Sequence[float] = (42.5, -10.0, 36.5, -6.0),  # N, W, S, E - mainland PT
     variables: Iterable[str] = ("fire_weather_index",),
-    years_per_request: int = YEARS_PER_REQUEST,
+    years_per_request: Optional[int] = None,
     max_workers: int = MAX_WORKERS,
 ) -> list[str]:
     """Download CEMS ERA5-based FWI reanalysis over mainland Portugal.
@@ -236,6 +282,9 @@ def download_fwi(
     Served from the EWDS, not the CDS. That store needs its own licence
     acceptance for this dataset - accepting the ERA5 licence on the CDS does
     not carry over, and the failure is a 403 at request time, not at login.
+
+    Its cost ceiling is also far higher than the CDS one, so far more years fit
+    in a single request; the limit is queried rather than assumed.
 
     The default box is deliberately a little larger than the coastline so that
     coastal grid points are not half-masked. Returns written paths.
@@ -247,12 +296,11 @@ def download_fwi(
     have = _years_on_disk(pattern)
     want = [y for y in range(cfg.year_start, cfg.year_end + 1) if y not in have]
 
-    jobs = []
-    for years in _chunk(want, years_per_request):
-        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
-        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
+    if not want:
+        return sorted(glob.glob(pattern))
 
-        request = {
+    def build(years):
+        return {
             "product_type": "reanalysis",
             "variable": list(variables),
             "dataset_type": "consolidated_dataset",
@@ -266,7 +314,15 @@ def download_fwi(
             "area": list(area),
             "data_format": "netcdf",
         }
-        jobs.append((EWDS_URL, CEMS_FIRE, request, path))
+
+    per = years_per_request or _years_per_request(
+        EWDS_URL, CEMS_FIRE, build(want[:1]), YEARS_PER_REQUEST_EWDS)
+
+    jobs = []
+    for years in _chunk(want, per):
+        span = f"{years[0]}" if len(years) == 1 else f"{years[0]}-{years[-1]}"
+        path = os.path.join(cfg.data_dir, f"{stem}_{span}.nc")
+        jobs.append((EWDS_URL, CEMS_FIRE, build(years), path))
 
     _run_jobs(jobs, max_workers)
     return sorted(glob.glob(pattern))
