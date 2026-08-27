@@ -95,9 +95,17 @@ def _retrieve(client, dataset: str, request: dict, path: str) -> None:
 YEARS_PER_REQUEST_CDS = 3
 YEARS_PER_REQUEST_EWDS = 30
 
-# Kept small on purpose. CDS caps concurrent requests per user and throttles or
-# rejects beyond it, so this overlaps queue waits without looking like abuse.
-MAX_WORKERS = 3
+# Three concurrent workers produced a submit/reject loop against a queue that
+# already held stuck jobs: CDS caps active requests per user, cdsapi retries a
+# rejection by submitting a fresh request, and three workers doing that compound
+# into a burst that keeps getting bounced. A serial run then completed cleanly.
+#
+# Two is the compromise - it halves the wall clock, which is dominated by queue
+# wait (~55 min per ERA5 request against ~20 s on the EWDS), while staying well
+# under whatever tripped the limiter. If rejections return, drop to 1: a
+# rejected request never completes, so concurrency that provokes one is a net
+# loss however fast it submits.
+MAX_WORKERS = 2
 
 _YEARS_IN_NAME = re.compile(r"_(\d{4})(?:-(\d{4}))?\.nc$")
 
