@@ -347,6 +347,55 @@ def test_download_plan():
     check("already-present years excluded", 2003 not in flat and 1985 not in flat)
 
 
+def test_multifile():
+    """Chunk files can interleave, and the reader must sort rather than raise.
+
+    Skipping years already on disk produces a file whose span encloses another
+    file's - 2001-2007 holding only 2001, 2002 and 2007, around a separate 2003
+    file. open_mfdataset(combine="by_coords") raises on that, and it only shows
+    up once such a chunk exists, which was after the full download finished.
+    """
+    print("\nmultifile read")
+    try:
+        import xarray as xr
+    except ImportError:
+        print("  [SKIP] xarray not installed")
+        return
+
+    import os
+    import tempfile
+
+    from regimes_pt.download import _open_many
+
+    def block(years):
+        t = np.concatenate([
+            np.arange(f"{y}-06-01", f"{y}-06-06", dtype="datetime64[D]")
+            for y in years])
+        return xr.Dataset(
+            {"z": ("valid_time", np.arange(len(t), dtype="float64"))},
+            coords={"valid_time": t.astype("datetime64[ns]")})
+
+    with tempfile.TemporaryDirectory() as d:
+        # Deliberately interleaved: the enclosing span is written first.
+        paths = []
+        for name, years in (("a_2001-2007", [2001, 2002, 2007]),
+                            ("b_2003", [2003]),
+                            ("c_2004-2006", [2004, 2005, 2006])):
+            p = os.path.join(d, name + ".nc")
+            block(years).to_netcdf(p)
+            paths.append(p)
+        ds = _open_many(paths)
+
+    t = ds["time"].values
+    check("interleaved spans open without raising", len(t) == 35, f"{len(t)} days")
+    check("time axis is sorted", bool((np.diff(t) > np.timedelta64(0)).all()))
+    check("no days lost or duplicated",
+          len(np.unique(t)) == 35 and len(t) == 35)
+    years = sorted({int(str(x)[:4]) for x in t})
+    check("every year present once", years == [2001, 2002, 2003, 2004, 2005,
+                                               2006, 2007], f"{years}")
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -356,6 +405,7 @@ def main() -> int:
     test_fire_link()
     test_regrid()
     test_download_plan()
+    test_multifile()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

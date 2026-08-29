@@ -348,6 +348,24 @@ def _rename_time(da):
     return da
 
 
+def _open_many(paths: Sequence[str]):
+    """Open several files and concatenate along a sorted time axis.
+
+    Deliberately not `open_mfdataset(combine="by_coords")`. A request that skips
+    years already on disk writes a file whose span encloses another file's -
+    2001-2007 holding only 2001, 2002 and 2007, around a separate 2003 file -
+    and by_coords cannot order interleaved spans into a monotonic index, so it
+    raises rather than sorting. Concatenating and sorting explicitly is correct
+    for any arrangement of chunks, including single years.
+    """
+    import xarray as xr
+
+    datasets = [_rename_time(xr.open_dataset(p, chunks={})) for p in paths]
+    combined = xr.concat(datasets, dim="time", coords="minimal",
+                         compat="override")
+    return combined.sortby("time")
+
+
 def _coarsen_to(da, target_grid: float):
     """Block-average from the native grid onto a `target_grid`-degree grid.
 
@@ -384,7 +402,7 @@ def open_z500(paths: Sequence[str], level: int = 500,
     """
     import xarray as xr
 
-    ds = xr.open_mfdataset(paths, combine="by_coords")
+    ds = _open_many(paths)
     name = "z" if "z" in ds else list(ds.data_vars)[0]
     da = ds[name]
 
@@ -421,8 +439,8 @@ def open_fwi(paths: Sequence[str]):
     import pandas as pd
     import xarray as xr
 
-    ds = xr.open_mfdataset(paths, combine="by_coords")
-    da = _rename_time(ds[list(ds.data_vars)[0]]).load()
+    ds = _open_many(paths)
+    da = ds[list(ds.data_vars)[0]].load()
 
     lat = "latitude" if "latitude" in da.dims else "lat"
     lon = "longitude" if "longitude" in da.dims else "lon"
