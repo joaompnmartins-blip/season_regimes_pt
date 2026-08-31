@@ -449,6 +449,52 @@ def test_fire_layer():
           f"{sd.day_fraction:.2f} days vs {sd.event_fraction:.2f} events")
 
 
+# ---------------------------------------------------------------------------
+# forecast degradation
+# ---------------------------------------------------------------------------
+
+def test_forecast_penalty():
+    """The synthetic-forecast machinery that decides whether this is operational.
+
+    Each property here, if wrong, flatters the forecast: a degradation that
+    keeps too much signal, a correlation that overshoots, or a weekly block
+    that spans the nine-month gap between two JJAS seasons.
+    """
+    print("\nforecast penalty")
+    rng = np.random.default_rng(0)
+
+    lab = np.repeat(np.arange(4), 250)
+    check("alpha=1 returns the truth unchanged",
+          np.array_equal(fire_link.degrade_labels(lab, 1.0, rng), lab))
+
+    # Falling back to climatology means the fallback is sometimes right by
+    # luck, so realized accuracy must sit ABOVE alpha, never below it.
+    acc = [float(np.mean(fire_link.degrade_labels(lab, a, rng) == lab))
+           for a in (0.0, 0.25, 0.5)]
+    check("realized accuracy exceeds alpha (lucky climatology hits)",
+          all(m > a - 1e-9 for m, a in zip(acc, (0.0, 0.25, 0.5))),
+          f"{[round(x, 3) for x in acc]}")
+    check("alpha=0 lands near the climatological hit rate",
+          abs(acc[0] - 0.25) < 0.05, f"{acc[0]:.3f} vs 1/4")
+
+    # A degraded continuous forecast must actually hit its target correlation.
+    x = rng.standard_normal(4000)
+    for rho in (0.3, 0.6, 0.9):
+        got = np.corrcoef(x, fire_link.degrade_series(x, rho, rng))[0, 1]
+        check(f"degrade_series achieves rho={rho}", abs(got - rho) < 0.05,
+              f"got {got:.3f}")
+
+    # Blocks must never straddle a season boundary.
+    season = np.repeat([2001, 2002], 10)
+    blocks = fire_link.block_aggregate(np.arange(20), season, block_len=7)
+    check("no block spans two seasons",
+          all(len(set(season[b])) == 1 for b in blocks))
+    check("blocks are exactly block_len long",
+          all(len(b) == 7 for b in blocks))
+    check("ragged season tail is dropped, not padded", len(blocks) == 2,
+          f"{len(blocks)} blocks from 2 seasons of 10 days")
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -460,6 +506,7 @@ def main() -> int:
     test_download_plan()
     test_multifile()
     test_fire_layer()
+    test_forecast_penalty()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

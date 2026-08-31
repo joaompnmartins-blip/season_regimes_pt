@@ -289,10 +289,129 @@ def step_fires(cfg: RunConfig, args):
     print(f"\nwrote {path}")
 
 
+def step_forecast(cfg: RunConfig, args):
+    """How much forecast skill the fire signal requires to survive.
+
+    Every odds ratio in the fire layer conditions on *observed* circulation. A
+    planner acts on a forecast, so the operative question is how much of the
+    signal survives an imperfect one. This needs no S2S archive: degrade the
+    known labels, measure what is left, and compare the requirement against
+    published sub-seasonal skill.
+
+    Two products are tested separately because they are scored differently.
+    A daily categorical label is what the three-state readiness ladder needs;
+    a weekly regime *frequency* is what extended-range forecasts are actually
+    verified on. Conflating them overstates the weaker one.
+    """
+    import glob
+    import json
+
+    import pandas as pd
+
+    fires = _load_fires(cfg)
+    daily = fires.groupby("date").agg(n=("codigo", "size"),
+                                      ha=("area_total_ha", "sum"))
+    rng = np.random.default_rng(cfg.cluster.random_state)
+    path = _regime_state_path(cfg, args.domain, args.k or 4)
+    with open(path, "rb") as fh:
+        st = pickle.load(fh)
+    k = st["k"]
+
+    times = pd.to_datetime(st["times"])
+    keep = ((times.year >= fires.date.dt.year.min())
+            & (times.year <= fires.date.dt.year.max()))
+    times, labels = times[keep], st["labels"][keep]
+    d = pd.DataFrame(index=times).join(daily).fillna({"n": 0, "ha": 0.0})
+    severe = (d.n.values >= 3)
+    burned = d.ha.values
+    season = times.year.values
+
+    out = {"domain": st["domain"], "k": k, "n_days": int(len(times))}
+
+    # Persistence: the floor any real forecast must beat.
+    full_t = pd.to_datetime(st["times"]); full_lab = st["labels"]
+    fy = full_t.year.values
+    out["persistence"] = {}
+    for lead in (1, 3, 5, 7, 10, 14, 21, 28, 35):
+        a, b = full_lab[:-lead], full_lab[lead:]
+        ok = (fy[:-lead] == fy[lead:]) & (a >= 0) & (b >= 0)
+        out["persistence"][str(lead)] = float(np.mean(a[ok] == b[ok]))
+    cats, counts = np.unique(labels, return_counts=True)
+    out["climatological_hit_rate"] = float(((counts / counts.sum()) ** 2).sum())
+
+    # Product A: daily categorical label.
+    out["daily_categorical"] = []
+    for alpha in (1.0, .9, .8, .7, .6, .5, .4, .3, .2, .1, .0):
+        acc, ors = [], {r: [] for r in range(k)}
+        for _ in range(args.n_draws):
+            fc = fire_link.degrade_labels(labels, alpha, rng)
+            acc.append(float(np.mean(fc == labels)))
+            for r in range(k):
+                ors[r].append(fire_link._odds_ratio(fc, severe, r)[0])
+        out["daily_categorical"].append(
+            {"alpha": alpha, "realized_accuracy": float(np.mean(acc)),
+             "odds_ratio": {str(r): float(np.mean(v)) for r, v in ors.items()},
+             "odds_ratio_sd": {str(r): float(np.std(v)) for r, v in ors.items()}})
+
+    # Product B: weekly regime frequency, the quantity S2S is scored on.
+    blocks = fire_link.block_aggregate(np.arange(len(times)), season, 7)
+    freq0 = np.array([(labels[b] == 0).mean() for b in blocks])
+    wk_severe = np.array([severe[b].sum() for b in blocks], dtype=float)
+    wk_burn = np.array([burned[b].sum() for b in blocks])
+    out["n_weeks"] = int(len(blocks))
+    out["weekly_truth"] = {}
+    order = np.argsort(np.argsort(freq0))
+    ter = np.floor(3 * order / len(order)).astype(int)
+    for g, nm in ((0, "low"), (1, "mid"), (2, "high")):
+        m = ter == g
+        out["weekly_truth"][nm] = {
+            "severe_per_week": float(wk_severe[m].mean()),
+            "burned_per_week": float(wk_burn[m].mean()),
+            "weeks_with_severe": float((wk_severe[m] > 0).mean())}
+    out["weekly_correlation"] = float(np.corrcoef(freq0, wk_severe)[0, 1])
+
+    out["weekly_degraded"] = []
+    for rho in (1.0, .8, .6, .5, .4, .3, .2):
+        ratios = []
+        for _ in range(args.n_draws * 5):
+            fc = fire_link.degrade_series(freq0, rho, rng)
+            o = np.floor(3 * np.argsort(np.argsort(fc)) / len(fc)).astype(int)
+            hi, lo = wk_severe[o == 2].mean(), wk_severe[o == 0].mean()
+            if lo > 0:
+                ratios.append(hi / lo)
+        out["weekly_degraded"].append(
+            {"rho": rho, "high_over_low": float(np.mean(ratios)),
+             "sd": float(np.std(ratios))})
+
+    print(f"=== forecast penalty: {st['domain']} k={k} ===")
+    print(f"climatological hit rate {100*out['climatological_hit_rate']:.1f}%; "
+          f"persistence at 14d {100*out['persistence']['14']:.1f}%, "
+          f"28d {100*out['persistence']['28']:.1f}%")
+    print("\ndaily categorical label - realized accuracy -> odds ratio")
+    for row in out["daily_categorical"]:
+        cells = "  ".join(f"r{r}={row['odds_ratio'][str(r)]:.2f}" for r in range(k))
+        print(f"  acc {100*row['realized_accuracy']:5.1f}%   {cells}")
+    print(f"\nweekly regime-0 frequency ({out['n_weeks']} weeks, "
+          f"r={out['weekly_correlation']:+.3f} with severe-day count)")
+    for nm in ("low", "mid", "high"):
+        w = out["weekly_truth"][nm]
+        print(f"  {nm:5s} severe/wk {w['severe_per_week']:.2f}   "
+              f"burned/wk {w['burned_per_week']/1000:6.1f}k ha")
+    print("\nweekly forecast correlation -> high/low tercile severe-day ratio")
+    for row in out["weekly_degraded"]:
+        print(f"  rho {row['rho']:.1f}   ratio {row['high_over_low']:.2f} "
+              f"+-{row['sd']:.2f}")
+
+    dest = os.path.join(cfg.out_dir, "forecast_penalty.json")
+    with open(dest, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nwrote {dest}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
-                    choices=["download", "regimes", "compare", "fires"])
+                    choices=["download", "regimes", "compare", "fires", "forecast"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -307,6 +426,7 @@ def main():
     # download_fwi skip files that already exist - so a one-year smoke test
     # costs nothing and its output is reused by the full run.
     ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--n-draws", type=int, default=30)
     ap.add_argument("--year-start", type=int, default=None)
     ap.add_argument("--year-end", type=int, default=None)
     args = ap.parse_args()
@@ -320,7 +440,8 @@ def main():
     cfg = RunConfig(data_dir=args.data_dir, out_dir=args.out_dir, **years)
     os.makedirs(cfg.out_dir, exist_ok=True)
     {"download": step_download, "regimes": step_regimes,
-     "compare": step_compare, "fires": step_fires}[args.step](cfg, args)
+     "compare": step_compare, "fires": step_fires,
+     "forecast": step_forecast}[args.step](cfg, args)
 
 
 if __name__ == "__main__":

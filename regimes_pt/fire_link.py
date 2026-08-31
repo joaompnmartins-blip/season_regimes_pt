@@ -321,6 +321,54 @@ def stand_down(labels: np.ndarray, exceed: np.ndarray, burned: np.ndarray,
     )
 
 
+def degrade_labels(labels: np.ndarray, alpha: float,
+                   rng: np.random.Generator) -> np.ndarray:
+    """A synthetic regime forecast that is right with probability `alpha`.
+
+    Answers the question that decides whether any of this is operational,
+    without needing an S2S archive: instead of asking what skill a forecast has
+    at week 3, ask how much skill the signal *requires*, then compare that
+    against published skill.
+
+    When wrong, the forecast falls back to the climatological distribution
+    rather than to a uniform draw. That is how a forecast actually degrades -
+    towards climatology, not towards nonsense - and it means the fallback is
+    sometimes right by luck, so `alpha` is always below the realized hit rate.
+    Report the realized rate, since that is what published skill scores measure.
+    """
+    cats, counts = np.unique(labels, return_counts=True)
+    clim = rng.choice(cats, size=len(labels), p=counts / counts.sum())
+    return np.where(rng.random(len(labels)) < alpha, labels, clim)
+
+
+def degrade_series(x: np.ndarray, rho: float,
+                   rng: np.random.Generator) -> np.ndarray:
+    """A synthetic forecast of a continuous predictor with correlation `rho`.
+
+    The counterpart of `degrade_labels` for a weekly regime *frequency*, which
+    is the quantity sub-seasonal forecasts are actually scored on. A daily
+    categorical label and a weekly frequency are different products with
+    different skill, and conflating them flatters the weaker one.
+    """
+    z = (x - x.mean()) / x.std()
+    return rho * z + np.sqrt(max(1.0 - rho ** 2, 0.0)) * rng.standard_normal(len(z))
+
+
+def block_aggregate(values: np.ndarray, season: np.ndarray, block_len: int = 7):
+    """Reduce a daily series to non-overlapping blocks that never span seasons.
+
+    A JJAS archive puts 30 September next to 1 June of the following year, so a
+    naive rolling window silently averages across a nine-month gap. Blocks are
+    cut within each season and the ragged tail of each season is dropped.
+    """
+    idx = []
+    for s in np.unique(season):
+        where = np.flatnonzero(season == s)
+        for i in range(0, len(where) - block_len + 1, block_len):
+            idx.append(where[i:i + block_len])
+    return np.asarray(idx, dtype=int)
+
+
 def compare_configurations(results: Sequence[tuple[str, SkillResult]]) -> str:
     """Format a comparison table of candidate configurations."""
     lines = [f"{'configuration':<28}{'BSS':>9}{'AUC':>8}{'n':>8}", "-" * 53]
