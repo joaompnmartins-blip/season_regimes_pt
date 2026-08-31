@@ -14,18 +14,34 @@ It is **not** a fire-probability product. The defensible output is a
 regime-conditioned **odds ratio** — "under regime X, Beira Interior has 2.8×
 baseline odds of a p95 FWI day" — not "38% chance of fire".
 
-Operational context: ICNF / GFR Algarve, sub-seasonal pre-positioning and
-prontidão planning at 2–6 week lead, not tactical forecasting.
+Operational context: ICNF / GFR Algarve, prontidão planning — **3–5 day lead,
+not 2–6 weeks**. The original sub-seasonal framing did not survive contact
+with the data and is kept here only because it explains older design choices.
+`--step forecast` showed the signal needs 68–76% categorical regime accuracy,
+which summer sub-seasonal forecasting does not have; `--step lead` showed the
+same signal carries 3–5 usable days from the *analysed* regime, at no skill
+cost. Still not tactical forecasting: the unit is a multi-day readiness
+posture, not a dispatch decision.
 
 ## Current state
 
 | | status |
 |---|---|
-| Pipeline code | written, unit-tested (39 assertions) |
+| Pipeline code | written, unit-tested (48 assertions) |
 | Synthetic end-to-end validation | passing, 7/7 |
-| Real ERA5 + CEMS run | **not done** — this is the open work |
+| Real ERA5 + CEMS run | done — 1980–2025 JJAS, 5612 days |
+| Fire layer (ICNF, ≥100 ha) | done — `--step fires` |
+| Forecast penalty | done — `--step forecast` |
+| Free lead + FWI increment | done — `--step lead` |
+| Composite Z500 maps | **not done** — needs cartopy; nobody has yet *looked* at the regimes |
+| Selection-bias treatment | **not done** — regimes were chosen by max odds ratio |
 
-The synthetic test proves the machinery. It says nothing about the atmosphere.
+The headline result: regime 0 halves the severe-fire-day rate over the
+following five days, and it survives stratification by FWI (0.49 in the top
+FWI quartile, 0.154 vs 0.316), so it adds to fire danger rather than
+restating it. Regimes govern **escape, not ignition** — testing against an
+absolute FWI threshold instead finds nothing, which is how this layer was
+once mistakenly written off.
 
 ## Layout
 
@@ -35,7 +51,7 @@ regimes_pt/download.py     CDS retrieval — ERA5 Z500, CEMS FWI reanalysis
 regimes_pt/preprocess.py   harmonic climatology, detrend, area weight, EOF
 regimes_pt/cluster.py      k-means, classifiability index, assignment, transitions
 regimes_pt/fire_link.py    regionalisation, composites, odds ratios, CV skill
-run_prototype.py           three-step CLI: download | regimes | compare
+run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead
 tests/test_units.py        invariant tests, no network, ~10 s
 tests/test_synthetic.py    ground-truth end-to-end, no network, ~3 min
 ```
@@ -50,6 +66,9 @@ python run_prototype.py --step download
 python run_prototype.py --step regimes --domain canonical_summer --k 4
 python run_prototype.py --step regimes --domain pt_tuned --select-k
 python run_prototype.py --step compare
+python run_prototype.py --step fires                             # needs data/ocoPT_*.csv
+python run_prototype.py --step forecast                          # how much skill it needs
+python run_prototype.py --step lead                              # how much lead is free
 ```
 
 CDS credentials go in `~/.cdsapirc`, never in the repo.
@@ -89,6 +108,19 @@ them produces output that still looks like weather and is wrong.
 8. **Reuse training climatology when assigning new days.** `project_and_assign`
    takes the climatology and weights as arguments for this reason. Recomputing
    them on a short forecast window is silent leakage.
+
+9. **Never let a window span two seasons.** Consecutive rows of a JJAS archive
+   put 30 September beside 1 June of the next year. A rolling mean across that
+   gap does not raise — it quietly averages September fire days into a June
+   forecast and inflates the apparent lead. `block_aggregate` and
+   `forward_window` both cut within seasons and drop the ragged tail.
+
+10. **Stratify by FWI before claiming the regime adds anything.** ICNF already
+    runs on fire danger. An unstratified regime effect can be pure repackaging
+    of FWI, and `lead_ratio_by_stratum` is the test that separates the two —
+    there is a unit test where a regime that *is* a covariate proxy collapses
+    from 2.62 to ~1.0 under stratification. Stratify on the window mean, not
+    the origin day, or the comparison understates what an FWI forecast knows.
 
 ## Known gotchas
 
