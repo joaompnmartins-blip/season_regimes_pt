@@ -495,6 +495,94 @@ def test_forecast_penalty():
           f"{len(blocks)} blocks from 2 seasons of 10 days")
 
 
+def test_free_lead():
+    """The forward-window machinery behind `--step lead`.
+
+    The failure that matters here is a window that reaches across the
+    nine-month gap between two JJAS seasons: it would not raise, it would just
+    quietly average September fire days into a June forecast and inflate the
+    lead the signal appears to carry.
+    """
+    print("\nfree lead")
+
+    # Two 10-day seasons laid end to end, as the archive stores them.
+    season = np.repeat([2001, 2002], 10)
+    values = np.concatenate([np.zeros(10), np.ones(10)])
+
+    origins, wmean = fire_link.forward_window(values, season, 3)
+    check("forward window never spans two seasons",
+          set(np.unique(wmean)) == {0.0, 1.0},
+          f"means seen: {sorted(set(wmean.tolist()))}")
+    check("forward window drops the ragged tail of each season",
+          len(origins) == 2 * (10 - 3),
+          f"{len(origins)} origins from 2 seasons of 10 days, horizon 3")
+    check("window is strictly forward-looking",
+          origins[0] == 0 and wmean[0] == 0.0)
+
+    # A regime that genuinely suppresses the next few days must come back with
+    # a ratio below 1; the point of the test is that the sign cannot silently
+    # flip through an off-by-one in the window offset.
+    rng = np.random.default_rng(3)
+    n_seasons, n_days = 40, 60
+    season = np.repeat(np.arange(n_seasons), n_days)
+    labels = rng.integers(0, 3, n_seasons * n_days)
+    # Suppress - but only partially. Zeroing the days after a regime-0 day
+    # gives an exact 0.0 ratio with a degenerate interval, which would let a
+    # broken bootstrap pass the width check below.
+    hazard = np.full(n_seasons * n_days, 0.25)
+    for i in np.flatnonzero(labels == 0):
+        hazard[i + 1:i + 4] = 0.05
+    exceed = rng.random(n_seasons * n_days) < hazard
+    r = fire_link.lead_ratio(labels, exceed, season, 0, 3, n_boot=300)
+    check("suppressive regime gives a forward ratio below 1",
+          r.ratio < 1 and r.ci_high < 1,
+          f"ratio {r.ratio:.2f} [{r.ci_low:.2f},{r.ci_high:.2f}]")
+
+    # A regime with no forward effect must not manufacture one.
+    exceed_null = rng.random(n_seasons * n_days) < 0.20
+    r0 = fire_link.lead_ratio(labels, exceed_null, season, 0, 3, n_boot=300)
+    check("null regime interval covers 1",
+          r0.ci_low < 1 < r0.ci_high,
+          f"ratio {r0.ratio:.2f} [{r0.ci_low:.2f},{r0.ci_high:.2f}]")
+
+    # Block bootstrap must stay wider than the naive independent-days one, for
+    # the same reason as everywhere else in this pipeline.
+    wide = fire_link.lead_ratio(labels, exceed, season, 0, 3, block_len=7,
+                                n_boot=400)
+    narrow = fire_link.lead_ratio(labels, exceed, season, 0, 3, block_len=1,
+                                  n_boot=400)
+    check("block bootstrap is wider than independent-days",
+          (wide.ci_high - wide.ci_low) > (narrow.ci_high - narrow.ci_low),
+          f"block {wide.ci_high - wide.ci_low:.3f} "
+          f"vs naive {narrow.ci_high - narrow.ci_low:.3f}")
+
+    # Stratification: a regime that is nothing but a proxy for the covariate
+    # must lose its apparent effect once the covariate is held fixed. This is
+    # the test that keeps the FWI-increment claim honest.
+    # The covariate has to persist, or an origin-day value cannot predict a
+    # forward window at all and the test is vacuous - which is also why the
+    # real version stratifies on FWI, a strongly autocorrelated field.
+    cov = np.zeros(n_seasons * n_days)
+    for i in range(1, len(cov)):
+        cov[i] = 0.9 * cov[i - 1] + 0.4 * rng.standard_normal()
+    hot = cov > np.quantile(cov, 0.7)
+    proxy = hot.astype(int)                  # regime 1 <=> high covariate
+    exceed_cov = rng.random(n_seasons * n_days) < np.where(hot, 0.5, 0.1)
+    unstrat = fire_link.lead_ratio(proxy, exceed_cov, season, 1, 3, n_boot=300)
+    strat = fire_link.lead_ratio_by_stratum(proxy, exceed_cov, cov, season, 1,
+                                            3, n_strata=4, n_boot=300)
+    inner = [s for s in strat if s.n_in >= 15 and np.isfinite(s.ratio)]
+    check("pure covariate proxy shows an effect before stratifying",
+          unstrat.ratio > 1.5, f"ratio {unstrat.ratio:.2f}")
+    check("... and loses most of it within covariate strata",
+          all(s.ratio < unstrat.ratio for s in inner),
+          f"strata {[round(s.ratio, 2) for s in inner]} vs {unstrat.ratio:.2f}")
+
+    check("strata partition every origin day",
+          sum(s.n_in for s in strat) == int((proxy[
+              fire_link.forward_window(exceed_cov, season, 3)[0]] == 1).sum()))
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -507,6 +595,7 @@ def main() -> int:
     test_multifile()
     test_fire_layer()
     test_forecast_penalty()
+    test_free_lead()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

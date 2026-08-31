@@ -408,10 +408,111 @@ def step_forecast(cfg: RunConfig, args):
     print(f"\nwrote {dest}")
 
 
+def step_lead(cfg: RunConfig, args):
+    """How far ahead the regime signal carries with no forecast at all.
+
+    `step_forecast` asks how much skill the signal needs and finds the answer
+    is more than sub-seasonal forecasting has. This asks the complementary
+    question: today's regime is *analysed*, so how many days of usable lead
+    does it buy for free? That reframes the product from a 2-6 week
+    pre-positioning aid - the operational context CLAUDE.md assumes, which the
+    forecast penalty rules out - to a short-range modifier, which needs no
+    regime forecast skill whatsoever.
+
+    Two results decide whether the layer is worth operating. The horizon scan
+    gives the window over which the signal is still significant. The
+    FWI-stratified table gives the only thing that matters after that: whether
+    the regime adds anything to the fire-danger forecast ICNF already uses, or
+    merely restates it.
+    """
+    import glob
+    import json
+
+    import pandas as pd
+
+    fires = _load_fires(cfg)
+    daily = fires.groupby("date").agg(n=("codigo", "size"),
+                                      ha=("area_total_ha", "sum"))
+    path = _regime_state_path(cfg, args.domain, args.k or 4)
+    with open(path, "rb") as fh:
+        st = pickle.load(fh)
+    k = st["k"]
+    times = pd.to_datetime(st["times"])
+    labels = st["labels"]
+
+    # FWI comes from its own archive on its own calendar; intersect, never
+    # assume alignment (see CLAUDE.md - different products, different leap-day
+    # and time-zone handling).
+    fwi_paths = sorted(glob.glob(os.path.join(cfg.data_dir, "fwi_*.nc")))
+    if not fwi_paths:
+        raise FileNotFoundError(f"no CEMS FWI files in {cfg.data_dir}")
+    values, fwi_times = download.open_fwi(fwi_paths)
+    fwi = pd.Series(values.mean(axis=1), index=pd.to_datetime(fwi_times))
+
+    keep = (times.isin(fwi.index)
+            & (times.year >= fires.date.dt.year.min())
+            & (times.year <= fires.date.dt.year.max()))
+    times, labels = times[keep], labels[keep]
+    fwi_daily = fwi.reindex(times).values
+    d = pd.DataFrame(index=times).join(daily).fillna({"n": 0, "ha": 0.0})
+    severe = (d.n.values >= 3)
+    season = times.year.values
+
+    regime = args.regime
+    out = {"domain": st["domain"], "k": k, "regime": regime,
+           "n_days": int(len(times)),
+           "years": [int(times.year.min()), int(times.year.max())]}
+
+    out["horizons"] = []
+    for h in (1, 2, 3, 5, 7, 10, 14):
+        r = fire_link.lead_ratio(labels, severe, season, regime, h,
+                                 n_boot=args.n_boot)
+        out["horizons"].append({
+            "horizon": h, "rate_in": r.rate_in, "rate_out": r.rate_out,
+            "ratio": r.ratio, "ci": [r.ci_low, r.ci_high], "n_in": r.n_in})
+
+    strat = fire_link.lead_ratio_by_stratum(
+        labels, severe, fwi_daily, season, regime, args.horizon,
+        n_strata=args.n_strata, n_boot=args.n_boot)
+    out["fwi_strata"] = [
+        {"stratum": s.stratum, "rate_in": s.rate_in, "rate_out": s.rate_out,
+         "ratio": s.ratio, "ci": [s.ci_low, s.ci_high], "n_in": s.n_in}
+        for s in strat]
+
+    print(f"=== free lead: {st['domain']} k={k} regime {regime} "
+          f"({out['years'][0]}-{out['years'][1]}, {out['n_days']} days) ===")
+    print("conditioning day is analysed, not forecast - this lead costs no skill\n")
+    print("  window     rate|r    rate|other   ratio  [95% CI]")
+    for row in out["horizons"]:
+        lo, hi = row["ci"]
+        mark = "*" if (lo > 1 or hi < 1) else " "
+        print(f"  +1..{row['horizon']:2d}d   {row['rate_in']:6.3f}    "
+              f"{row['rate_out']:8.3f}   {row['ratio']:5.2f} "
+              f"[{lo:4.2f},{hi:4.2f}]{mark}")
+
+    print(f"\nwithin quantile bins of {args.horizon}-day window-mean FWI "
+          f"- does the regime add to fire danger, or restate it?")
+    print("  stratum    n(r)   rate|r    rate|other   ratio  [95% CI]")
+    for row in out["fwi_strata"]:
+        lo, hi = row["ci"]
+        mark = "*" if (lo > 1 or hi < 1) else " "
+        name = f"Q{row['stratum'] + 1}"
+        print(f"  {name:8s} {row['n_in']:5d}  {row['rate_in']:6.3f}    "
+              f"{row['rate_out']:8.3f}   {row['ratio']:5.2f} "
+              f"[{lo:4.2f},{hi:4.2f}]{mark}")
+    print("\n  * = 95% block-bootstrap CI excludes 1")
+
+    dest = os.path.join(cfg.out_dir, "free_lead.json")
+    with open(dest, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nwrote {dest}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
-                    choices=["download", "regimes", "compare", "fires", "forecast"])
+                    choices=["download", "regimes", "compare", "fires",
+                             "forecast", "lead"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -427,6 +528,12 @@ def main():
     # costs nothing and its output is reused by the full run.
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--n-draws", type=int, default=30)
+    # --step lead. Regime 0 is the suppressive regime and the only one whose
+    # signal survives aggregation; 5 days is the window it is still strong at
+    # while remaining long enough to move crews on.
+    ap.add_argument("--regime", type=int, default=0)
+    ap.add_argument("--horizon", type=int, default=5)
+    ap.add_argument("--n-strata", type=int, default=4)
     ap.add_argument("--year-start", type=int, default=None)
     ap.add_argument("--year-end", type=int, default=None)
     args = ap.parse_args()
@@ -441,7 +548,7 @@ def main():
     os.makedirs(cfg.out_dir, exist_ok=True)
     {"download": step_download, "regimes": step_regimes,
      "compare": step_compare, "fires": step_fires,
-     "forecast": step_forecast}[args.step](cfg, args)
+     "forecast": step_forecast, "lead": step_lead}[args.step](cfg, args)
 
 
 if __name__ == "__main__":

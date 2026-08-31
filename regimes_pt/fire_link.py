@@ -369,6 +369,139 @@ def block_aggregate(values: np.ndarray, season: np.ndarray, block_len: int = 7):
     return np.asarray(idx, dtype=int)
 
 
+@dataclass
+class LeadResult:
+    horizon: int                # window is t+1 .. t+horizon
+    regime: int
+    stratum: int                # -1 when unstratified
+    rate_in: float              # mean exceedance rate in the window, after the regime
+    rate_out: float             # ... after every other day
+    ratio: float
+    ci_low: float
+    ci_high: float
+    n_in: int                   # origin days in the regime
+
+
+def forward_window(values: np.ndarray, season: np.ndarray, horizon: int):
+    """Mean of `values` over t+1..t+horizon, per origin day t.
+
+    Returns `(origins, window_mean)` where `origins` indexes the day the
+    window is issued from. Windows that would run past the end of a season are
+    dropped rather than wrapped, for the reason given in `block_aggregate`:
+    consecutive rows of a JJAS archive straddle a nine-month gap at the year
+    boundary, and a window that spans it is meteorological nonsense.
+
+    Assumes days within one season are contiguous and in date order, which is
+    what the pipeline produces; a gappy series would silently shorten the
+    effective horizon.
+    """
+    if horizon < 1:
+        raise ValueError("horizon must be at least one day")
+    origins, means = [], []
+    for s in np.unique(season):
+        where = np.flatnonzero(season == s)
+        for i in range(len(where) - horizon):
+            origins.append(where[i])
+            means.append(values[where[i + 1:i + 1 + horizon]].mean())
+    return np.asarray(origins, dtype=int), np.asarray(means, dtype=float)
+
+
+def _rate_ratio(inr: np.ndarray, wmean: np.ndarray) -> float:
+    if inr.sum() == 0 or (~inr).sum() == 0:
+        return np.nan
+    out = wmean[~inr].mean()
+    return float(wmean[inr].mean() / out) if out > 0 else np.nan
+
+
+def _block_ci(inr: np.ndarray, wmean: np.ndarray, block_len: int,
+              n_boot: int, rng: np.random.Generator) -> tuple[float, float]:
+    n = len(inr)
+    n_blocks = int(np.ceil(n / block_len))
+    pool = np.arange(0, max(n - block_len + 1, 1))
+    boots = np.empty(n_boot)
+    for b in range(n_boot):
+        starts = rng.choice(pool, size=n_blocks, replace=True)
+        idx = np.concatenate([np.arange(s, s + block_len) for s in starts])[:n]
+        idx = idx[idx < n]
+        boots[b] = _rate_ratio(inr[idx], wmean[idx])
+    if np.all(np.isnan(boots)):
+        return float("nan"), float("nan")
+    lo, hi = np.nanpercentile(boots, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def lead_ratio(labels: np.ndarray, exceed: np.ndarray, season: np.ndarray,
+               regime: int, horizon: int, block_len: int = 7,
+               n_boot: int = 2000, random_state: int = 0) -> LeadResult:
+    """Exceedance rate over the next `horizon` days, given today's regime.
+
+    The lead this measures is *free*: the conditioning day is analysed, not
+    forecast, so unlike everything in `step_forecast` there is no skill
+    requirement to discount. Whatever survives here survives operationally.
+
+    Use this rather than a single lagged odds ratio at lead L. A planner
+    commits resources across a window and cannot act on "day 4 specifically";
+    the window mean is the quantity the decision is actually taken on, and it
+    is the more favourable of the two because the near days carry most of the
+    signal.
+    """
+    origins, wmean = forward_window(exceed.astype(float), season, horizon)
+    inr = labels[origins] == regime
+    rng = np.random.default_rng(random_state)
+    lo, hi = _block_ci(inr, wmean, block_len, n_boot, rng)
+    return LeadResult(
+        horizon=horizon, regime=regime, stratum=-1,
+        rate_in=float(wmean[inr].mean()) if inr.any() else float("nan"),
+        rate_out=float(wmean[~inr].mean()) if (~inr).any() else float("nan"),
+        ratio=_rate_ratio(inr, wmean), ci_low=lo, ci_high=hi,
+        n_in=int(inr.sum()),
+    )
+
+
+def lead_ratio_by_stratum(labels: np.ndarray, exceed: np.ndarray,
+                          covariate: np.ndarray, season: np.ndarray,
+                          regime: int, horizon: int, n_strata: int = 4,
+                          min_days: int = 15, block_len: int = 7,
+                          n_boot: int = 2000,
+                          random_state: int = 0) -> list[LeadResult]:
+    """`lead_ratio` within quantile bins of a window-mean covariate.
+
+    The covariate is averaged over the same forward window as the outcome, not
+    taken at the origin day, because the intended covariate is FWI and the
+    comparison of interest is against what an FWI *forecast* would already
+    tell a planner about those days. Stratifying on the origin-day value
+    instead would understate how much of the regime signal FWI subsumes.
+
+    This is the test that decides whether the regime layer earns its place:
+    ICNF already runs on fire danger, so a regime signal that vanishes inside
+    an FWI stratum is a repackaging of FWI rather than an addition to it.
+    Strata thinner than `min_days` regime days are returned with NaN interval
+    rather than dropped, so the caller can see the coverage.
+    """
+    origins, wmean = forward_window(exceed.astype(float), season, horizon)
+    _, cmean = forward_window(np.asarray(covariate, dtype=float), season, horizon)
+    inr = labels[origins] == regime
+    edges = np.quantile(cmean, np.linspace(0, 1, n_strata + 1))
+    edges[-1] = np.nextafter(edges[-1], np.inf)
+    rng = np.random.default_rng(random_state)
+
+    results = []
+    for j in range(n_strata):
+        m = (cmean >= edges[j]) & (cmean < edges[j + 1])
+        a, w = inr[m], wmean[m]
+        if a.sum() < min_days or (~a).sum() < min_days:
+            lo = hi = float("nan")
+        else:
+            lo, hi = _block_ci(a, w, block_len, n_boot, rng)
+        results.append(LeadResult(
+            horizon=horizon, regime=regime, stratum=j,
+            rate_in=float(w[a].mean()) if a.any() else float("nan"),
+            rate_out=float(w[~a].mean()) if (~a).any() else float("nan"),
+            ratio=_rate_ratio(a, w), ci_low=lo, ci_high=hi, n_in=int(a.sum()),
+        ))
+    return results
+
+
 def compare_configurations(results: Sequence[tuple[str, SkillResult]]) -> str:
     """Format a comparison table of candidate configurations."""
     lines = [f"{'configuration':<28}{'BSS':>9}{'AUC':>8}{'n':>8}", "-" * 53]
