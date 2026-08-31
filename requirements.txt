@@ -16,5 +16,10 @@ dask>=2023.1
 # CDS retrieval (Stage 3 onward; needs ~/.cdsapirc)
 cdsapi>=0.7
 
-# Optional: composite plotting, not yet used by any module
+# Composite maps (--step maps). Optional: nothing in the numerical core or in
+# tests/test_units.py imports either, so the pipeline and its invariants run
+# without them. cartopy pulls in PROJ and shapely and is by far the heaviest
+# dependency here, which is why plots.py is a separate module imported inside
+# the step rather than at package level.
 matplotlib>=3.7
+cartopy>=0.22

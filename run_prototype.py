@@ -508,11 +508,75 @@ def step_lead(cfg: RunConfig, args):
     print(f"\nwrote {dest}")
 
 
+def step_maps(cfg: RunConfig, args):
+    """Draw the regimes. The one claim in this project nothing else can test.
+
+    Every result so far is a number conditioned on a label. Whether those
+    labels correspond to the circulation the tuned domain was drawn to resolve
+    - an upper ridge over NW Africa with a cut-off low west of Portugal - is
+    not something an odds ratio can answer, and it has never been looked at.
+
+    Anomalies are recomputed rather than read from the state pickle so that
+    the map is in gpm on the unweighted grid: the stored `anom_w` carries the
+    sqrt(cos lat) factor, which belongs in the distance metric and nowhere
+    near a plot.
+    """
+    import glob
+
+    from regimes_pt import plots
+
+    path = _regime_state_path(cfg, args.domain, args.k or 4)
+    with open(path, "rb") as fh:
+        st = pickle.load(fh)
+    k = st["k"]
+    prep = _load_prepared(cfg, args.domain, args.grid)
+    if len(prep.times) != len(st["labels"]):
+        raise ValueError(
+            f"prepared field has {len(prep.times)} days but the fitted state has "
+            f"{len(st['labels'])} - refit with --step regimes before mapping")
+
+    # Seasonal-mean total height, so the contours show closed features rather
+    # than an anomaly pattern floating free of the mean flow.
+    paths = sorted(glob.glob(os.path.join(
+        cfg.data_dir, f"z{cfg.level}_{args.domain}_{cfg.season}_*.nc")))
+    da = download.open_z500(paths, level=cfg.level, target_grid=args.grid)
+    total_mean = da.mean("time").values.ravel()
+
+    # Carry the fire result onto the map, so the pattern and the risk it
+    # implies are read together rather than in separate documents.
+    notes = {}
+    fire_json = os.path.join(cfg.out_dir, "fire_regime.json")
+    if os.path.exists(fire_json):
+        with open(fire_json) as fh:
+            fr = json.load(fh)
+        for row in fr.get("odds", []):
+            notes[int(row["regime"])] = f"OR {row['odds_ratio']:.2f}"
+
+    dest = os.path.join(cfg.out_dir, f"composites_{args.domain}_k{k}.png")
+    plots.regime_panels(
+        prep.anom, st["labels"], prep.lat, prep.lon, prep.shape, k, dest,
+        total_mean=total_mean, annotations=notes,
+        title=f"Z500 composites - {args.domain}, {cfg.season} 1980-2025, k={k}")
+    print(f"wrote {dest}")
+
+    for r in range(k):
+        mean, t, n_eff = plots.composite(prep.anom, st["labels"], r)
+        m = mean.reshape(prep.shape)
+        i_hi = np.unravel_index(np.argmax(m), m.shape)
+        i_lo = np.unravel_index(np.argmin(m), m.shape)
+        print(f"  regime {r}: n_eff {n_eff:5.0f}   "
+              f"max {m[i_hi]:+6.1f} gpm at {prep.lat[i_hi[0]]:.0f}N "
+              f"{prep.lon[i_hi[1]]:.0f}E   "
+              f"min {m[i_lo]:+6.1f} gpm at {prep.lat[i_lo[0]]:.0f}N "
+              f"{prep.lon[i_lo[1]]:.0f}E   "
+              f"|t|>2 on {100 * np.mean(np.abs(t) > 2):.0f}% of the domain")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
                     choices=["download", "regimes", "compare", "fires",
-                             "forecast", "lead"])
+                             "forecast", "lead", "maps"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -548,7 +612,8 @@ def main():
     os.makedirs(cfg.out_dir, exist_ok=True)
     {"download": step_download, "regimes": step_regimes,
      "compare": step_compare, "fires": step_fires,
-     "forecast": step_forecast, "lead": step_lead}[args.step](cfg, args)
+     "forecast": step_forecast, "lead": step_lead,
+     "maps": step_maps}[args.step](cfg, args)
 
 
 if __name__ == "__main__":

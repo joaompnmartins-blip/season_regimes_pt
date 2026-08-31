@@ -583,6 +583,48 @@ def test_free_lead():
               fire_link.forward_window(exceed_cov, season, 3)[0]] == 1).sum()))
 
 
+def test_composites():
+    """The numerics behind the composite maps, without importing matplotlib.
+
+    A composite is the one output here that is judged by eye, which makes a
+    quiet error in it unusually dangerous: a map with the weighting left in,
+    or with every point significant because days were counted as independent,
+    still looks exactly like weather.
+    """
+    print("\ncomposites")
+    from regimes_pt import plots
+
+    # Three 5-day episodes of regime 0 among 100 days: 15 days, 3 independent
+    # samples, not 15. Counting days would inflate any t-statistic by sqrt(5).
+    labels = np.full(100, 1)
+    for start in (10, 40, 70):
+        labels[start:start + 5] = 0
+    check("effective n counts episodes, not days",
+          np.isclose(plots.effective_n(labels, 0), 3.0),
+          f"{plots.effective_n(labels, 0):.1f} from 15 days in 3 episodes")
+
+    # A regime with a known constant offset must come back with that offset.
+    rng = np.random.default_rng(11)
+    anom = rng.standard_normal((100, 6)) * 2.0
+    anom[labels == 0] += 50.0
+    mean, t, n_eff = plots.composite(anom, labels, 0)
+    check("composite recovers the imposed anomaly",
+          np.allclose(mean, 50.0, atol=1.5), f"mean {mean.mean():.1f} gpm")
+    check("composite t uses the episode count",
+          np.allclose(np.abs(t), np.abs(mean) / (anom[labels == 0].std(
+              axis=0, ddof=1) / np.sqrt(3.0)), rtol=1e-6))
+
+    # The weighting must never reach a map: unweight then composite has to
+    # equal composite then unweight, and the pipeline does the former.
+    area_w = np.sqrt(np.cos(np.deg2rad(np.linspace(30, 55, 6))))
+    m_unw = plots.composite(anom / area_w, labels, 0)[0]
+    check("unweighting commutes with compositing",
+          np.allclose(m_unw, mean / area_w))
+
+    check("an empty regime raises rather than returning NaNs",
+          _raises(plots.composite, anom, labels, 3))
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -596,6 +638,7 @@ def main() -> int:
     test_fire_layer()
     test_forecast_penalty()
     test_free_lead()
+    test_composites()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))
