@@ -10,6 +10,14 @@ A prototype that tests one scientific question:
 > extreme-fire circulation (upper ridge over NW Africa + cut-off low west of
 > Portugal) better than the canonical Euro-Atlantic four-regime partition?
 
+**The circulation in that question is half wrong**, as of the composite maps.
+The cut-off low is real — regime 2 is the only one of the four with a closed
+low in the composite total height field, at 42°N 14°W. The NW Africa ridge is
+not: that box averages −25.9 gpm, the wrong sign. The ridge is at 55°N 14°W,
+due north of the low, which is a blocking ridge with a cut-off low beneath it
+— the textbook way cut-off lows form. Do not go looking for the subtropical
+ridge; it was design intent, never a finding.
+
 It is **not** a fire-probability product. The defensible output is a
 regime-conditioned **odds ratio** — "under regime X, Beira Interior has 2.8×
 baseline odds of a p95 FWI day" — not "38% chance of fire".
@@ -27,13 +35,13 @@ posture, not a dispatch decision.
 
 | | status |
 |---|---|
-| Pipeline code | written, unit-tested (48 assertions) |
+| Pipeline code | written, unit-tested (53 assertions) |
 | Synthetic end-to-end validation | passing, 7/7 |
 | Real ERA5 + CEMS run | done — 1980–2025 JJAS, 5612 days |
 | Fire layer (ICNF, ≥100 ha) | done — `--step fires` |
 | Forecast penalty | done — `--step forecast` |
 | Free lead + FWI increment | done — `--step lead` |
-| Composite Z500 maps | **not done** — needs cartopy; nobody has yet *looked* at the regimes |
+| Composite Z500 maps | done — `--step maps`; they falsified half the domain rationale |
 | Selection-bias treatment | **not done** — regimes were chosen by max odds ratio |
 
 The headline result: regime 0 halves the severe-fire-day rate over the
@@ -51,7 +59,8 @@ regimes_pt/download.py     CDS retrieval — ERA5 Z500, CEMS FWI reanalysis
 regimes_pt/preprocess.py   harmonic climatology, detrend, area weight, EOF
 regimes_pt/cluster.py      k-means, classifiability index, assignment, transitions
 regimes_pt/fire_link.py    regionalisation, composites, odds ratios, CV skill
-run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead
+regimes_pt/plots.py        composite maps — optional, needs matplotlib + cartopy
+run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead | maps
 tests/test_units.py        invariant tests, no network, ~10 s
 tests/test_synthetic.py    ground-truth end-to-end, no network, ~3 min
 ```
@@ -69,6 +78,7 @@ python run_prototype.py --step compare
 python run_prototype.py --step fires                             # needs data/ocoPT_*.csv
 python run_prototype.py --step forecast                          # how much skill it needs
 python run_prototype.py --step lead                              # how much lead is free
+python run_prototype.py --step maps                              # composites; needs cartopy
 ```
 
 CDS credentials go in `~/.cdsapirc`, never in the repo.
@@ -158,5 +168,6 @@ them produces output that still looks like weather and is wrong.
 - **Live forecast path.** Hindcast only. Would need licensed ECMWF regime
   probabilities, or a GEFS/IFS open-data Z500 pull projected onto fitted
   centroids via `cluster.project_and_assign`.
-- **Plotting.** No cartopy dependency yet. Composite maps are the obvious next
-  addition.
+- **Regionalised composites.** `--step maps` draws the national picture only.
+  Per-region composites would test whether the North/Centre signal and the
+  (much thinner) South signal come from the same circulation.
