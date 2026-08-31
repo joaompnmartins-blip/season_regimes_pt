@@ -156,10 +156,143 @@ def step_compare(cfg: RunConfig, args):
         json.dump(per_region, f, indent=2, default=float)
 
 
+def _load_fires(cfg: RunConfig):
+    """ICNF occurrence record as (dates, area_ha, district), fires >= 100 ha.
+
+    Not a download: the extract is a fixed input tracked in the repo, because
+    every number in the fire layer depends on this exact file and it cannot be
+    regenerated from any API.
+    """
+    import glob
+
+    import pandas as pd
+
+    paths = sorted(glob.glob(os.path.join(cfg.data_dir, "ocoPT_*.csv")))
+    if not paths:
+        raise FileNotFoundError(
+            f"no ICNF occurrence CSV in {cfg.data_dir} (expected ocoPT_*.csv)")
+    df = pd.read_csv(paths[0])
+    df["date"] = pd.to_datetime(df["data_alerta"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    return df
+
+
+def step_fires(cfg: RunConfig, args):
+    """Regime-conditioned odds of an actual large-fire day.
+
+    The layer CLAUDE.md deliberately left unbuilt, now that the ICNF record is
+    available. Note what the target is: fires that reached 100 ha, not FWI
+    exceedance. Regimes do not predict ignition - ignition here is
+    overwhelmingly human - they predict whether an ignition escapes, and
+    escape is what a circulation pattern can plausibly govern. Testing against
+    an absolute FWI threshold instead finds nothing, which is how this layer
+    was mistakenly written off before the fire record was in hand.
+    """
+    import glob
+    import json
+
+    import pandas as pd
+
+    fires = _load_fires(cfg)
+    fwi, ftimes = download.open_fwi(
+        sorted(glob.glob(os.path.join(cfg.data_dir, f"fwi_pt_{cfg.season}_*.nc"))))
+    national_fwi = pd.Series(fwi.mean(axis=1), index=ftimes)
+
+    daily = fires.groupby("date").agg(n=("codigo", "size"),
+                                      ha=("area_total_ha", "sum"))
+    out = {"n_fires": int(len(fires)),
+           "burned_ha": float(fires["area_total_ha"].sum()),
+           "year_range": [int(fires.date.dt.year.min()),
+                          int(fires.date.dt.year.max())],
+           "partitions": {}}
+
+    for path in sorted(glob.glob(os.path.join(
+            cfg.out_dir, f"regimes_*_{cfg.season}_k*.pkl"))):
+        with open(path, "rb") as fh:
+            st = pickle.load(fh)
+        name = f"{st['domain']}_k{st['k']}"
+        k = st["k"]
+
+        # Restrict the circulation record to the years the fire record covers.
+        times = pd.to_datetime(st["times"])
+        keep = ((times.year >= fires.date.dt.year.min())
+                & (times.year <= fires.date.dt.year.max()))
+        times, labels = times[keep], st["labels"][keep]
+
+        d = pd.DataFrame(index=times).join(daily).fillna({"n": 0, "ha": 0.0})
+        counts, burned = d.n.values, d.ha.values
+        fwi_day = national_fwi.reindex(times).values
+
+        outcomes = {
+            "any_large_fire": counts > 0,
+            "severe_day_3plus": counts >= 3,
+            "extreme_day_1000ha": burned >= 1000.0,
+        }
+
+        entry = {"n_days": int(len(times)),
+                 "unclassified_frac": float((labels < 0).mean()),
+                 "outcomes": {}, "episodes": {}, "stand_down": {}}
+
+        for oname, exc in outcomes.items():
+            odds = fire_link.odds_by_regime(labels, exc, k, block_len=7,
+                                            n_boot=args.n_boot)
+            skill = fire_link.cv_brier_skill(labels, exc, times.year.values, k)
+            entry["outcomes"][oname] = {
+                "n_events": int(exc.sum()),
+                "auc": skill.auc, "bss": skill.bss,
+                "regimes": [{"regime": o.regime, "odds_ratio": o.odds_ratio,
+                             "ci_low": o.ci_low, "ci_high": o.ci_high,
+                             "n_days": o.n_days,
+                             "excludes_one": bool(o.ci_low > 1 or o.ci_high < 1)}
+                            for o in odds],
+            }
+
+        # Does the regime survive conditioning on the stronger predictor?
+        finite = np.isfinite(fwi_day)
+        quartile = np.full(len(fwi_day), -1)
+        quartile[finite] = pd.qcut(fwi_day[finite], 4, labels=False)
+        severe = outcomes["severe_day_3plus"]
+        entry["fwi_quartile_rate"] = fire_link.stratified_rate(
+            labels, quartile, severe, k, 4).tolist()
+
+        for r in range(k):
+            entry["episodes"][str(r)] = [int(x) for x in
+                                         fire_link.episodes(labels, r)]
+            sd = fire_link.stand_down(labels, severe, burned, r)
+            entry["stand_down"][str(r)] = {
+                "days": sd.days, "day_fraction": sd.day_fraction,
+                "events_missed": sd.events_missed,
+                "event_fraction": sd.event_fraction,
+                "burned_fraction": sd.burned_fraction,
+            }
+
+        out["partitions"][name] = entry
+
+        print(f"\n=== {name}  ({entry['n_days']} {cfg.season} days, "
+              f"{100*entry['unclassified_frac']:.1f}% unclassified) ===")
+        for oname, res in entry["outcomes"].items():
+            print(f"  {oname:20s} n={res['n_events']:4d}  AUC {res['auc']:.3f}  "
+                  f"BSS {res['bss']:+.4f}")
+            for rr in res["regimes"]:
+                mark = "*" if rr["excludes_one"] else " "
+                print(f"      regime {rr['regime']}: OR {rr['odds_ratio']:5.2f} "
+                      f"[{rr['ci_low']:5.2f},{rr['ci_high']:5.2f}]{mark}")
+        print("  severe-day rate by FWI quartile x regime (rows Q1..Q4):")
+        for qi, row in enumerate(entry["fwi_quartile_rate"]):
+            cells = "  ".join("   -  " if x is None or np.isnan(x)
+                              else f"{100*x:5.1f}%" for x in row)
+            print(f"      Q{qi+1}  {cells}")
+
+    path = os.path.join(cfg.out_dir, "fire_regime.json")
+    with open(path, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nwrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
-                    choices=["download", "regimes", "compare"])
+                    choices=["download", "regimes", "compare", "fires"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -173,6 +306,7 @@ def main():
     # ~92 queued requests. Retrieval is idempotent - download_z500 and
     # download_fwi skip files that already exist - so a one-year smoke test
     # costs nothing and its output is reused by the full run.
+    ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--year-start", type=int, default=None)
     ap.add_argument("--year-end", type=int, default=None)
     args = ap.parse_args()
@@ -186,7 +320,7 @@ def main():
     cfg = RunConfig(data_dir=args.data_dir, out_dir=args.out_dir, **years)
     os.makedirs(cfg.out_dir, exist_ok=True)
     {"download": step_download, "regimes": step_regimes,
-     "compare": step_compare}[args.step](cfg, args)
+     "compare": step_compare, "fires": step_fires}[args.step](cfg, args)
 
 
 if __name__ == "__main__":

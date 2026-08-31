@@ -243,6 +243,84 @@ def cv_brier_skill(
                        auc=auc, n=int(ok.sum()))
 
 
+def stratified_rate(labels: np.ndarray, strata: np.ndarray,
+                    exceed: np.ndarray, k: int, n_strata: int,
+                    min_days: int = 20) -> np.ndarray:
+    """Exceedance rate in every (stratum, regime) cell, as a fraction.
+
+    The point of the stratification is to ask whether the regime still says
+    anything once a stronger predictor has spoken. Stratifying on FWI quartile
+    and finding the regimes still spread within a stratum is the only evidence
+    that the circulation adds information rather than restating the fuel state.
+
+    Cells thinner than `min_days` come back NaN rather than as a rate computed
+    from a handful of days, which would be noise wearing the shape of a signal.
+    """
+    out = np.full((n_strata, k), np.nan)
+    for s in range(n_strata):
+        for r in range(k):
+            cell = (strata == s) & (labels == r)
+            if cell.sum() >= min_days:
+                out[s, r] = float(exceed[cell].mean())
+    return out
+
+
+def episodes(labels: np.ndarray, regime: int) -> np.ndarray:
+    """Lengths of consecutive runs of `regime`, in days.
+
+    Regimes persist for about a week, and that persistence is what makes them
+    plannable: a decision taken against a 4-day block is actionable in a way a
+    single flagged day is not. Callers use the run-length distribution to state
+    how many decision windows a season actually offers.
+
+    Runs are counted within the array as given, so a caller passing several
+    seasons concatenated must accept that a run spanning a season boundary is
+    an artefact - JJAS archives have no such boundary days adjacent in reality.
+    """
+    lengths = []
+    run = 0
+    for x in labels:
+        if x == regime:
+            run += 1
+        elif run:
+            lengths.append(run)
+            run = 0
+    if run:
+        lengths.append(run)
+    return np.asarray(lengths, dtype=int)
+
+
+@dataclass
+class StandDownResult:
+    regime: int
+    days: int                   # days spent in the regime
+    day_fraction: float         # share of the season released
+    events_missed: int          # exceedance days inside the regime
+    event_fraction: float       # share of all exceedance days released
+    burned_fraction: float      # share of total burned area released
+
+
+def stand_down(labels: np.ndarray, exceed: np.ndarray, burned: np.ndarray,
+               regime: int) -> StandDownResult:
+    """What standing down on every day of `regime` would have cost.
+
+    Deliberately a hindcast with no forecast uncertainty in it: this is the
+    ceiling on what a regime-conditioned stand-down can achieve, never the
+    expectation. Presenting it as anything else would overstate the product by
+    exactly the amount of skill the forecast turns out to lack.
+    """
+    inr = labels == regime
+    total_burn = float(burned.sum())
+    return StandDownResult(
+        regime=regime,
+        days=int(inr.sum()),
+        day_fraction=float(inr.mean()),
+        events_missed=int(exceed[inr].sum()),
+        event_fraction=float(exceed[inr].sum() / max(exceed.sum(), 1)),
+        burned_fraction=float(burned[inr].sum() / total_burn) if total_burn else 0.0,
+    )
+
+
 def compare_configurations(results: Sequence[tuple[str, SkillResult]]) -> str:
     """Format a comparison table of candidate configurations."""
     lines = [f"{'configuration':<28}{'BSS':>9}{'AUC':>8}{'n':>8}", "-" * 53]

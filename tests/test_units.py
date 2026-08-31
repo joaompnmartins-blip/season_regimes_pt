@@ -396,6 +396,59 @@ def test_multifile():
                                                2006, 2007], f"{years}")
 
 
+# ---------------------------------------------------------------------------
+# fire layer
+# ---------------------------------------------------------------------------
+
+def test_fire_layer():
+    """The occurrence layer's three claims, each of which fails silently.
+
+    A stratified rate computed from a thin cell, a run-length that merges two
+    episodes, or a stand-down fraction taken against the wrong denominator all
+    produce numbers that look operational and are wrong.
+    """
+    print("\nfire layer")
+
+    # Stratification must not invent rates from thin cells.
+    lab = np.array([0, 0, 0, 1, 1, 1] * 20)
+    strata = np.array([0] * 60 + [1] * 60)
+    exc = np.zeros(120, dtype=bool)
+    exc[strata == 1] = True                      # every event in stratum 1
+    rates = fire_link.stratified_rate(lab, strata, exc, k=2, n_strata=2,
+                                      min_days=20)
+    check("stratified rate recovers the cell rate",
+          np.allclose(rates[0], 0.0) and np.allclose(rates[1], 1.0))
+    thin = fire_link.stratified_rate(lab, strata, exc, k=2, n_strata=2,
+                                     min_days=100)
+    check("thin cells return NaN, not a rate", bool(np.isnan(thin).all()))
+
+    # Run lengths: the persistence claim rests on these.
+    runs = fire_link.episodes(np.array([0, 0, 1, 0, 0, 0, 1, 1, 0]), 0)
+    check("episode lengths correct", list(runs) == [2, 3, 1], f"{list(runs)}")
+    check("a run touching the end is counted",
+          list(fire_link.episodes(np.array([1, 0, 0]), 0)) == [2])
+    check("absent regime gives no episodes",
+          len(fire_link.episodes(np.array([1, 1, 1]), 0)) == 0)
+
+    # Stand-down accounting: fractions must use the right denominators.
+    lab = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    exc = np.array([1, 0, 0, 0, 1, 1, 1, 1], dtype=bool)
+    burned = np.array([10.0, 0, 0, 0, 100.0, 100.0, 100.0, 100.0])
+    sd = fire_link.stand_down(lab, exc, burned, regime=0)
+    check("stand-down day fraction", abs(sd.day_fraction - 0.5) < 1e-12)
+    check("events missed counted inside the regime", sd.events_missed == 1)
+    check("event fraction is of ALL events, not of the regime",
+          abs(sd.event_fraction - 0.2) < 1e-12, f"{sd.event_fraction:.3f}")
+    check("burned fraction is of ALL burned area",
+          abs(sd.burned_fraction - 10.0 / 410.0) < 1e-12)
+
+    # The asymmetry the proposal rests on: releasing many days should be able
+    # to cost few events. If this ever inverts, the headline claim is dead.
+    check("a large day share can carry a small event share",
+          sd.day_fraction > 2 * sd.event_fraction,
+          f"{sd.day_fraction:.2f} days vs {sd.event_fraction:.2f} events")
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -406,6 +459,7 @@ def main() -> int:
     test_regrid()
     test_download_plan()
     test_multifile()
+    test_fire_layer()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

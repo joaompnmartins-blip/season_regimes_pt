@@ -13,6 +13,11 @@ data/*
 out/*
 !data/.gitkeep
 !out/.gitkeep
+
+# The ICNF occurrence record is a fixed input, not a retrieval artefact: it is
+# small, it is not reproducible from any API, and every fire-layer number
+# depends on this exact extract. Track it.
+!data/ocoPT_*.csv
 *.nc
 *.nc4
 *.grib
