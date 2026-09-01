@@ -625,6 +625,78 @@ def test_composites():
           _raises(plots.composite, anom, labels, 3))
 
 
+def test_cwt():
+    """Jenkinson-Collison types against fields whose answer is known a priori.
+
+    Every failure mode here is silent: a sign slip in the vorticity turns every
+    cyclone into an anticyclone, a transposed grid point rotates the whole
+    compass, and both produce a plausible-looking type distribution.
+    """
+    print("\ncwt")
+    from regimes_pt import cwt
+
+    lat = np.arange(20.0, 61.0)
+    lon = np.arange(-40.0, 11.0)
+    LO, LA = np.meshgrid(lon, lat)
+
+    def types(fields):
+        return cwt.classify(np.asarray(fields), lat, lon)
+
+    # Geostrophic flow: in the NH, high pressure to the south gives a westerly.
+    west = types([-LA])[0]
+    east = types([LA])[0]
+    south = types([LO])[0]
+    north = types([-LO])[0]
+    check("high to the south gives westerly", west == "W", west)
+    check("high to the north gives easterly", east == "E", east)
+    check("high to the east gives southerly", south == "S", south)
+    check("high to the west gives northerly", north == "N", north)
+
+    # A pure rotation: a bowl (low centre) must be cyclonic, a dome anticyclonic.
+    r2 = (LO - cwt.CENTRE_LON) ** 2 + 4 * (LA - cwt.CENTRE_LAT) ** 2
+    check("closed low classifies cyclonic", types([r2])[0] == "C", types([r2])[0])
+    check("closed high classifies anticyclonic", types([-r2])[0] == "A",
+          types([-r2])[0])
+
+    # The three regimes of the rule are set by |Z|/F alone, so walk a westerly
+    # flow of growing strength past a fixed low and check the type crosses the
+    # boundaries in the right order: rotational, hybrid, then directional.
+    walk = [types([-LA * a + r2 * 0.6])[0] for a in (8, 60, 200)]
+    check("rule crosses |Z|/F = 2 and 1 in order",
+          walk == ["C", "CW", "W"], " -> ".join(walk))
+
+    hyb = walk[1]
+    check("hybrid names both rotation and direction",
+          len(hyb) > 1 and hyb[0] in "AC" and hyb[1:] in cwt.DIRECTIONS, hyb)
+
+    p_h = cwt.sample(np.asarray([-LA * 60 + r2 * 0.6]), lat, lon)
+    ratio = abs(cwt.indices(p_h)[2][0]) / cwt.indices(p_h)[3][0]
+    check("hybrid really sits between F and 2F", 1.0 <= ratio <= 2.0,
+          f"|Z|/F = {ratio:.2f}")
+
+    # Scale invariance is what licenses running this on gpm instead of hPa.
+    a = types([-LA * 3 + r2 * 0.4])[0]
+    b = types([(-LA * 3 + r2 * 0.4) * 137.0])[0]
+    check("classification is invariant to field scaling", a == b, f"{a} vs {b}")
+
+    # Vorticity sign convention: cyclonic is positive.
+    p = cwt.sample(np.asarray([r2]), lat, lon)
+    check("cyclonic vorticity is positive", cwt.indices(p)[2][0] > 0)
+
+    # The stencil must be the published one: 16 points, 10 by 5 degrees,
+    # spanning 25W-5E and 30-50N when centred over Portugal.
+    pts = cwt.grid_points()
+    lons = sorted({x for x, _ in pts}); lats = sorted({y for _, y in pts})
+    check("sixteen grid points", len(pts) == 16, str(len(pts)))
+    check("grid spans 25W-5E, 30-50N",
+          lons == [-25, -15, -5, 5] and lats == [30, 35, 40, 45, 50],
+          f"{lons} {lats}")
+
+    codes, vocab = cwt.to_codes(np.array(["A", "NE", "A", "C"], dtype=object))
+    check("codes round-trip through the vocabulary",
+          [vocab[c] for c in codes] == ["A", "NE", "A", "C"])
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -639,6 +711,7 @@ def main() -> int:
     test_forecast_penalty()
     test_free_lead()
     test_composites()
+    test_cwt()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

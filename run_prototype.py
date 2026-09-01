@@ -572,11 +572,156 @@ def step_maps(cfg: RunConfig, args):
               f"|t|>2 on {100 * np.mean(np.abs(t) > 2):.0f}% of the domain")
 
 
+def step_cwt(cfg: RunConfig, args):
+    """Benchmark the fitted regimes against the classification IPMA would use.
+
+    `--step compare` scores the tuned partition against `canonical_summer`, a
+    k-means partition built for the Euro-Atlantic winter. That is a straw man.
+    The real question is whether an EOF/k-means partition beats
+    Jenkinson-Collison circulation weather types (Trigo & DaCâmara 2000), which
+    are cheap, validated for this region, and the basis of the published
+    extreme-wildfire climatology (Carmo et al. 2022).
+
+    The comparison is run on the same days, the same fire outcome and the same
+    leave-one-year-out split, so the only thing varying is the classification.
+    Note the deviation recorded in `cwt.py`: the published scheme is applied to
+    mean sea-level pressure and this runs on Z500, so a type named here is an
+    upper-level flow direction, not Carmo's surface one. Frequencies will not
+    match the paper.
+    """
+    import glob
+    import json
+
+    import pandas as pd
+
+    from regimes_pt import cwt
+
+    fires = _load_fires(cfg)
+    daily = fires.groupby("date").agg(n=("codigo", "size"))
+    path = _regime_state_path(cfg, args.domain, args.k or 4)
+    with open(path, "rb") as fh:
+        st = pickle.load(fh)
+
+    paths = sorted(glob.glob(os.path.join(
+        cfg.data_dir, f"z{cfg.level}_{args.domain}_{cfg.season}_*.nc")))
+    da = download.open_z500(paths, level=cfg.level, target_grid=args.grid)
+    lat = da[("latitude" if "latitude" in da.dims else "lat")].values
+    lon = da[("longitude" if "longitude" in da.dims else "lon")].values
+    labels_cwt = cwt.classify(da.values, lat, lon)
+
+    times = pd.to_datetime(st["times"])
+    keep = ((times.year >= fires.date.dt.year.min())
+            & (times.year <= fires.date.dt.year.max()))
+    times = times[keep]
+    reg = st["labels"][keep]
+    cw = labels_cwt[keep]
+    d = pd.DataFrame(index=times).join(daily).fillna({"n": 0})
+    severe = (d.n.values >= 3)
+    years = times.year.values
+    season = years
+
+    out = {"n_days": int(len(times)), "field": "Z500 (not MSLP - see cwt.py)",
+           "years": [int(years.min()), int(years.max())]}
+
+    # Frequencies and per-type severe-day rates, the Carmo Table 1 layout.
+    base = severe.mean()
+    rows = []
+    for name in sorted(set(cw.tolist())):
+        m = cw == name
+        if m.sum() < 30:
+            continue
+        rows.append({"type": name, "days": int(m.sum()),
+                     "freq": float(m.mean()), "rate": float(severe[m].mean()),
+                     "ratio": float(severe[m].mean() / base)})
+    rows.sort(key=lambda r: -r["ratio"])
+    out["types"] = rows
+
+    print(f"=== CWT benchmark: {out['n_days']} days, "
+          f"{out['years'][0]}-{out['years'][1]} ===")
+    print("Jenkinson-Collison on Z500, NOT MSLP - types are upper-level flow.\n")
+    print(f"  baseline severe-day rate {base:.3f}")
+    print("  type    days    freq    rate   vs base")
+    for r in rows:
+        print(f"  {r['type']:5s} {r['days']:6d}  {r['freq']:6.3f}  "
+              f"{r['rate']:6.3f}  {r['ratio']:6.2f}")
+
+    # The benchmark proper: same outcome, same folds, same days.
+    #
+    # Two fairness checks travel with it, because the headline comparison is
+    # unfair in both directions. The regimes leave ~14% of days unclassified
+    # and issue climatology there by construction (invariant 4), so they are
+    # handicapped on the full sample - hence the classified-only row. And 26
+    # types against 4 regimes could win on flexibility alone, so the hybrids
+    # are also collapsed onto their pure directional parent to give the ten
+    # basic types Trigo retains. If the CWT advantage were an artefact of
+    # either, it would not survive both.
+    cw_codes, vocab = cwt.to_codes(cw)
+    basic = np.array([x[1:] if (len(x) > 1 and x[0] in "AC"
+                                and x[1:] in cwt.DIRECTIONS) else x
+                      for x in cw], dtype=object)
+    b_codes, b_vocab = cwt.to_codes(basic)
+    classified = reg >= 0
+
+    contenders = [
+        ("k-means regimes (k=4)", reg, int(st["k"])),
+        (f"CWT full ({len(vocab)} types)", cw_codes, len(vocab)),
+        (f"CWT basic ({len(b_vocab)} types)", b_codes, len(b_vocab)),
+    ]
+    out["skill"] = []
+    for tag, mask in (("all days", np.ones(len(severe), bool)),
+                      (f"classified days only ({classified.mean():.1%})",
+                       classified)):
+        print(f"\n  leave-one-year-out skill for a severe fire day - {tag}")
+        print(f"  {'classification':<28}{'BSS':>9}{'AUC':>8}{'n':>8}")
+        for name, lab, k in contenders:
+            sk = fire_link.cv_brier_skill(lab[mask], severe[mask],
+                                          years[mask], k)
+            out["skill"].append({"subset": tag, "name": name,
+                                 "bss": sk.bss, "auc": sk.auc, "n": sk.n})
+            print(f"  {name:<28}{sk.bss:>9.4f}{sk.auc:>8.3f}{sk.n:>8d}")
+
+    # How far this is from the published classification, stated rather than
+    # buried: on Z500 the mid-latitude westerlies dominate, so the type
+    # distribution barely resembles Carmo's surface one.
+    out["frequency_vs_carmo"] = {}
+    print("\n  type frequency here (Z500) vs Carmo et al. 2022 (MSLP, summer)")
+    for nm, carmo in (("NE", 22.1), ("E", 3.0), ("N", 17.8), ("A", 13.8),
+                      ("C", 5.4), ("W", 3.7), ("SW", 1.7)):
+        here = 100 * float(np.mean(basic == nm))
+        out["frequency_vs_carmo"][nm] = {"here": here, "carmo": carmo}
+        print(f"    {nm:3s} {here:6.1f}%   {carmo:5.1f}%")
+
+    # And the product we actually propose: a five-day forward hold signal.
+    print(f"\n  five-day forward window, best suppressive class in each scheme")
+    best = {}
+    for tag, lab, names in (("regime", reg, [str(i) for i in range(int(st["k"]))]),
+                            ("CWT", cw_codes, vocab)):
+        cands = []
+        for i, nm in enumerate(names):
+            if (lab == i).sum() < 100:
+                continue
+            r = fire_link.lead_ratio(lab, severe, season, i, 5,
+                                     n_boot=args.n_boot)
+            cands.append((r.ratio, nm, r))
+        cands.sort()
+        ratio, nm, r = cands[0]
+        best[tag] = {"class": nm, "ratio": r.ratio, "ci": [r.ci_low, r.ci_high],
+                     "n": r.n_in}
+        print(f"    {tag:7s} {nm:>4s}   ratio {r.ratio:.2f} "
+              f"[{r.ci_low:.2f},{r.ci_high:.2f}]   n={r.n_in}")
+    out["lead_best"] = best
+
+    dest = os.path.join(cfg.out_dir, "cwt_benchmark.json")
+    with open(dest, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nwrote {dest}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
                     choices=["download", "regimes", "compare", "fires",
-                             "forecast", "lead", "maps"])
+                             "forecast", "lead", "maps", "cwt"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -613,7 +758,7 @@ def main():
     {"download": step_download, "regimes": step_regimes,
      "compare": step_compare, "fires": step_fires,
      "forecast": step_forecast, "lead": step_lead,
-     "maps": step_maps}[args.step](cfg, args)
+     "maps": step_maps, "cwt": step_cwt}[args.step](cfg, args)
 
 
 if __name__ == "__main__":
