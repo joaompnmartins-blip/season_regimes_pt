@@ -29,7 +29,10 @@ Operational context: ICNF / GFR Algarve, prontidão planning — **3–5 day lea
 not 2–6 weeks**. The original sub-seasonal framing did not survive contact
 with the data and is kept here only because it explains older design choices.
 `--step forecast` showed the signal needs 68–76% categorical regime accuracy,
-which summer sub-seasonal forecasting does not have; `--step lead` showed the
+which no plausible extended-range forecast supplies — the internal argument is
+that 68% at week 3 would have to beat *persistence at day 3* (48.6%), and no
+published skill figure is cited here because the one that was is wrong (see
+`docs/README.md`); `--step lead` showed the
 same signal carries 3–5 usable days from the *analysed* regime, at no skill
 cost. Still not tactical forecasting: the unit is a multi-day readiness
 posture, not a dispatch decision.
@@ -77,7 +80,7 @@ regimes_pt/plots.py        composite maps — optional, needs matplotlib + carto
 run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead | maps
 tests/test_units.py        invariant tests, no network, ~10 s
 tests/test_synthetic.py    ground-truth end-to-end, no network, ~3 min
-docs/README.md             related work — read before claiming novelty
+docs/README.md             related work + a corrected mis-citation of ours
 ```
 
 `docs/README.md` matters more than its size suggests. Carmo et al. (2022) is
