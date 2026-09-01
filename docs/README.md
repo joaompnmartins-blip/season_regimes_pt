@@ -302,3 +302,95 @@ expense, and the extreme-precipitation work cited above makes its case on
 cost–loss value at low ratios. The five-day hold signal has all the inputs
 needed — hit rate, false-alarm rate, base rate — and converting it would say
 whether a 0.47 ratio is worth acting on far better than the ratio itself does.
+
+---
+
+## Correction: the 0.5 forecast correlation was mis-cited
+
+`--step forecast` reports what the fire signal retains as a weekly regime-frequency
+forecast degrades, and its headline was stated as *"1.5× at roughly the published
+week 3–4 skill level"*, citing ECMWF Newsletter 165. **That newsletter contains no
+verification statistics.** It is a product-description and case-study article for
+winter 2019/2020 — regime definitions, chart products, one case study. All 15 pages
+have now been read. The 0.5 anchor is not in it, and no verified source for it exists
+in this repository.
+
+What survives and what does not:
+
+- **The requirement stands.** 68–76% categorical accuracy is computed from our data.
+- **The degradation sweep stands.** rho 1.0→0.39, 0.8→0.49, 0.6→0.59, 0.5→0.67,
+  0.3→0.81 are our numbers, a sweep over an assumed correlation.
+- **The mapping from rho to real forecast skill does not.** Labelling the rho = 0.5
+  row "roughly published week 3–4" was an attribution to a source that does not say
+  it. State it as a sweep, not as a verified operating point.
+- **The Büeler et al. (2021) attribution for "summer is the weakest season for regime
+  forecasting" is also unverified** — that paper is not in `docs/`.
+
+**The conclusion does not depend on the broken citation**, which is why this is a
+correction and not a retraction. Three independent things still kill the weekly
+product: the whole sweep is weak (even rho = 0.8 returns only 2.0×); weekly regime-2
+frequency is non-monotonic against severe days (r = +0.114) at any rho; and Carmo's
+Figure 4 shows the circulation precursor appearing only at day −2. Where a citation
+is genuinely wanted, use our own persistence numbers instead — daily categorical
+accuracy of 68% at week 3 would have to beat persistence at day 3 (48.6%), which is
+an argument from this repository's own data and needs nobody's paper.
+
+---
+
+## docs_new/ — five papers, unread until now
+
+### Humphrey et al. (2024), *Int. J. Wildland Fire* — the closest precedent
+
+Near-term fire-weather forecasting in the Pacific Northwest using **500 hPa map
+types**. The design is ours: discrete upper-air types augmenting subregional fire
+danger models, and the question is whether the synoptic type adds to surface-based
+indices. Their answer is yes — the map types *"explain variation in wildfire
+occurrence not captured by fire danger indices based on surface weather alone, with
+specific map types associated with significantly higher expected daily ignition
+counts in half of the subregions."*
+
+Three things to take from it. It is the precedent for our FWI-stratified result, and
+it is a **positive** one. It works at 500 hPa, which weakens the objection that our
+Z500 CWT benchmark is meaningless — upper-air types can carry operational value in
+their own right, not only as a proxy for surface flow. And it is explicitly
+**near-term**, matching the short-range pivot rather than the abandoned
+sub-seasonal framing.
+
+One difference to state whenever this is cited: their outcome is **ignition counts**,
+ours is escape of an ignition into a large fire. The mechanisms are not the same, and
+"half of the subregions" is a partial result, not a clean win.
+
+### Vieira, Russo & Trigo (2020), *Forests* 11, 547 — two types, not one
+
+Classifies summer large fires across 54 Iberian provinces by local-scale weather.
+For each province **two significant fire-weather types**: one dominated by high
+temperature and negative humidity anomalies, the other by **intense zonal wind
+anomalies** with two subtypes, giving three distinct regions across Iberia.
+
+This is independent support for the regime-2 blending problem. If the fire-weather
+population is genuinely two-part at province scale — a hot-dry mode and a wind mode —
+then a single elevating regime cannot represent it, which is what the 5.1× height-
+tercile split inside regime 2 already showed from a different direction.
+
+### Ruffault et al. (2020), *Sci. Rep.* 10:13790
+
+Heat-induced large wildfires in the Mediterranean basin. Trigo and Russo are
+co-authors, so it shares lineage with the Portuguese work above. Read for the
+fire-weather-type definitions before designing any sub-clustering of regime 2.
+
+### Turco, Marcos-Matamoros et al. — the operational precedent
+
+A seasonal fire-risk climate service built **with** the Catalan fire prevention
+office (SPIF): an SPEI-to-burned-area model, fed with forecasts, and *"assessed by
+using cross-validation to evaluate the predictions as if they had been made
+operationally."* The precedent worth copying is not the model, it is the method —
+built through a participatory approach with end-users, with variables and thresholds
+chosen jointly. Nothing in this repository has been near an end-user.
+
+### ECMWF Newsletter 165
+
+Confirms the operational setup: **two four-regime sets, cold (October–April) and warm
+(May–September)**, with patterns adjusted for the seasonal signal, days too far from
+any cluster assigned to no regime. Our JJAS sits inside the warm-season definition, and
+the no-regime rule is the same choice as invariant 4. Contains **no skill scores** —
+see the correction above.

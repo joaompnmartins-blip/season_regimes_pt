@@ -29,6 +29,8 @@ out/*
 # is all-rights-reserved; Carmo et al. (2022) is CC BY-NC-ND, and a text
 # extraction is plausibly the derivative that licence excludes. This repo is
 # public, so only docs/README.md - our own notes and the citations - is tracked.
+docs/**/*.txt
+docs/**/*.pdf
 docs/*.txt
 docs/*.pdf
 
