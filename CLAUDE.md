@@ -49,6 +49,7 @@ posture, not a dispatch decision.
 | Free lead + FWI increment | done — `--step lead` |
 | Composite Z500 maps | done — `--step maps`; they falsified half the domain rationale |
 | CWT benchmark | done — `--step cwt`; **the k-means partition loses it** |
+| Cost–loss decision value | done — `--step value`; **the increment over FWI is ~0** |
 | Selection-bias treatment | **not done** — regimes were chosen by max odds ratio |
 
 **The k-means partition loses to a 1970s finite-difference scheme.** `--step
@@ -61,11 +62,20 @@ severe deviation (W is 38.8% of days here vs 3.7% in Carmo). **Get MSLP before
 defending the EOF/k-means machinery.**
 
 The headline result: regime 0 halves the severe-fire-day rate over the
-following five days, and it survives stratification by FWI (0.49 in the top
-FWI quartile, 0.154 vs 0.316), so it adds to fire danger rather than
-restating it. Regimes govern **escape, not ignition** — testing against an
-absolute FWI threshold instead finds nothing, which is how this layer was
-once mistakenly written off.
+following five days, and it survives *quartile* stratification by FWI (0.49 in
+the top FWI quartile, 0.154 vs 0.316). Regimes govern **escape, not
+ignition** — testing against an absolute FWI threshold instead finds nothing,
+which is how this layer was once mistakenly written off.
+
+**But it does not survive the decision test.** `--step value` conditions on
+*continuous* FWI instead of quartiles and asks what a planner gains. The
+regime term stays real (OR 0.58 conditional on FWI), yet AUC moves 0.790 →
+0.793 and cost–loss value moves ~+0.01 across every C/L ratio. Quartile
+stratification is too coarse a control: within the top quartile, regime-0 days
+sit 1.4 FWI points lower than the rest, and continuous conditioning absorbs
+what the quartile left. The increment grows as the FWI forecast degrades
+(+0.013 AUC at rho 0.6) but never becomes large. **On this evidence the layer
+is not worth operating as a decision aid on top of FWI.**
 
 ## Layout
 
@@ -105,6 +115,7 @@ python run_prototype.py --step forecast                          # how much skil
 python run_prototype.py --step lead                              # how much lead is free
 python run_prototype.py --step maps                              # composites; needs cartopy
 python run_prototype.py --step cwt                               # benchmark vs Trigo CWT
+python run_prototype.py --step value                             # cost–loss: is it worth acting on?
 ```
 
 CDS credentials go in `~/.cdsapirc`, never in the repo.
@@ -151,12 +162,17 @@ them produces output that still looks like weather and is wrong.
    forecast and inflates the apparent lead. `block_aggregate` and
    `forward_window` both cut within seasons and drop the ragged tail.
 
-10. **Stratify by FWI before claiming the regime adds anything.** ICNF already
-    runs on fire danger. An unstratified regime effect can be pure repackaging
-    of FWI, and `lead_ratio_by_stratum` is the test that separates the two —
-    there is a unit test where a regime that *is* a covariate proxy collapses
-    from 2.62 to ~1.0 under stratification. Stratify on the window mean, not
-    the origin day, or the comparison understates what an FWI forecast knows.
+10. **Stratify by FWI before claiming the regime adds anything, and do not
+    stop at quartiles.** ICNF already runs on fire danger. An unstratified
+    regime effect can be pure repackaging of FWI, and `lead_ratio_by_stratum`
+    separates the two — there is a unit test where a regime that *is* a
+    covariate proxy collapses from 2.62 to ~1.0 under stratification.
+    Stratify on the window mean, not the origin day. But a surviving
+    *quartile* effect is not evidence of operational value: `--step value`
+    conditions on continuous FWI and the same signal that halves the rate in
+    the top quartile is worth +0.003 AUC. A stratified odds ratio and a
+    decision increment are different quantities, and only the second is what
+    an operational reader is buying.
 
 ## Known gotchas
 

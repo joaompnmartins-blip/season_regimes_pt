@@ -502,6 +502,59 @@ def lead_ratio_by_stratum(labels: np.ndarray, exceed: np.ndarray,
     return results
 
 
+def loyo_probabilities(cells: np.ndarray, event: np.ndarray, years: np.ndarray,
+                       n_cells: int, min_days: int = 20) -> np.ndarray:
+    """P(event | cell), fitted leave-one-year-out.
+
+    The forecast a cost-loss calculation needs is a probability, not a label,
+    and it has to be honest out of sample or the value is fitted rather than
+    earned. Cells thinner than `min_days` in a training split fall back to that
+    split's base rate, so a rare cell cannot manufacture a confident
+    probability from three days.
+    """
+    p = np.full(len(cells), np.nan)
+    for y in np.unique(years):
+        tr, te = years != y, years == y
+        base = event[tr].mean()
+        rates = np.array([
+            event[tr & (cells == c)].mean()
+            if (tr & (cells == c)).sum() >= min_days else base
+            for c in range(n_cells)
+        ])
+        p[te] = rates[cells[te]]
+    return p
+
+
+def cost_loss_value(prob: np.ndarray, event: np.ndarray,
+                    alpha: float) -> float:
+    """Value of a probabilistic forecast in the standard cost-loss model.
+
+    A decision maker pays C to protect and loses L if the event happens
+    unprotected; `alpha` is C/L. The optimal rule is to protect when the
+    forecast probability exceeds alpha, which is why value has to be evaluated
+    across a range of alpha rather than at a single threshold - a service with
+    cheap protection and expensive losses sits at a very different operating
+    point from one where standing up a crew is the dominant cost.
+
+    Value is scaled so that 0 is the better of the two climatological
+    strategies (always protect, never protect) and 1 is a perfect forecast.
+    Negative means the forecast is worse than doing the same thing every day.
+    """
+    s = float(event.mean())
+    act = prob > alpha
+    e_forecast = alpha * act.mean() + float((event & ~act).mean())
+    e_clim = min(alpha, s)
+    e_perfect = alpha * s
+    denom = e_clim - e_perfect
+    return float((e_clim - e_forecast) / denom) if denom > 0 else np.nan
+
+
+def cost_loss_curve(prob: np.ndarray, event: np.ndarray,
+                    alphas: Sequence[float]) -> np.ndarray:
+    """`cost_loss_value` over a grid of cost-loss ratios."""
+    return np.array([cost_loss_value(prob, event, a) for a in alphas])
+
+
 def compare_configurations(results: Sequence[tuple[str, SkillResult]]) -> str:
     """Format a comparison table of candidate configurations."""
     lines = [f"{'configuration':<28}{'BSS':>9}{'AUC':>8}{'n':>8}", "-" * 53]

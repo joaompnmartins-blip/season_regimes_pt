@@ -697,6 +697,65 @@ def test_cwt():
           [vocab[c] for c in codes] == ["A", "NE", "A", "C"])
 
 
+def test_cost_loss():
+    """The decision model, against cases where value is known analytically.
+
+    A cost-loss curve is easy to get wrong in a way that flatters the forecast:
+    the reference is the *better* of two climatological strategies, and using
+    the wrong one turns a worthless forecast into a valuable-looking one.
+    """
+    print("\ncost-loss")
+
+    rng = np.random.default_rng(7)
+    n = 4000
+    event = rng.random(n) < 0.25
+
+    # A perfect forecast scores 1 at every cost-loss ratio.
+    perfect = event.astype(float)
+    vals = [fire_link.cost_loss_value(perfect, event, a)
+            for a in (.05, .25, .5, .8)]
+    check("perfect forecast scores 1 everywhere",
+          np.allclose(vals, 1.0), f"{np.round(vals, 4)}")
+
+    # A constant forecast is one of the two climatological strategies, so it
+    # can never beat the reference - value must be <= 0, never positive.
+    const = np.full(n, 0.25)
+    vals = [fire_link.cost_loss_value(const, event, a)
+            for a in (.05, .2, .25, .3, .8)]
+    check("constant forecast never scores above 0",
+          max(vals) <= 1e-9, f"max {max(vals):.4f}")
+
+    # Climatological value is 0 exactly at alpha = base rate, where the two
+    # climatological strategies cost the same.
+    check("value is 0 at alpha equal to the base rate",
+          abs(fire_link.cost_loss_value(const, event, 0.25)) < 1e-9)
+
+    # A forecast anti-correlated with the truth must be actively harmful.
+    check("inverted forecast has negative value",
+          fire_link.cost_loss_value(1.0 - perfect, event, 0.25) < 0)
+
+    # An informative but imperfect forecast lands strictly between the two.
+    noisy = np.clip(0.5 * event + rng.normal(0, .15, n) + .2, 0, 1)
+    v = fire_link.cost_loss_value(noisy, event, 0.25)
+    check("imperfect forecast lands strictly between 0 and 1",
+          0 < v < 1, f"{v:.3f}")
+
+    # Leave-one-year-out probabilities must not leak the scored year.
+    years = np.repeat(np.arange(20), 200)
+    # Give one year a wildly different rate; its fitted probability must come
+    # from the other years, so it cannot match its own rate.
+    ev = rng.random(n) < 0.2
+    ev[years == 3] = True
+    cells = np.zeros(n, dtype=int)
+    p = fire_link.loyo_probabilities(cells, ev, years, 1)
+    check("leave-one-year-out does not fit the scored year",
+          p[years == 3].mean() < 0.5,
+          f"year 3 is all-event but scored at p={p[years == 3].mean():.3f}")
+
+    check("curve returns one value per alpha",
+          len(fire_link.cost_loss_curve(noisy, event, [.1, .2, .3])) == 3)
+
+
 def main() -> int:
     print("=" * 60)
     print("regimes_pt unit tests")
@@ -712,6 +771,7 @@ def main() -> int:
     test_free_lead()
     test_composites()
     test_cwt()
+    test_cost_loss()
     print("\n" + "=" * 60)
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: " + ", ".join(FAILURES))

@@ -717,11 +717,145 @@ def step_cwt(cfg: RunConfig, args):
     print(f"\nwrote {dest}")
 
 
+def step_value(cfg: RunConfig, args):
+    """Does the regime earn its place in a decision, not just in a table?
+
+    Every other step reports a rate or a ratio. An operational reader decides
+    on expected expense, and their question is not "is the regime signal real"
+    but "would acting on it have cost less than acting on fire danger alone".
+    That is the cost-loss model: pay C to hold readiness, lose L to a severe
+    fire day caught unprotected. The answer depends entirely on C/L, so this
+    reports a curve rather than a number.
+
+    Probabilities come from logistic regression fitted leave-one-year-out, not
+    from binned rates. An earlier version binned FWI into deciles and produced
+    a value curve that jumped by +/-0.05 with no monotone structure - that was
+    an artefact of a `p > alpha` rule crossing bin edges, not a result.
+    Continuous conditioning matters for a second reason too: it is a far
+    stricter control than the quartile stratification in `--step lead`, and the
+    gap between the two is most of what this step found.
+
+    The FWI baseline is deliberately generous - observed window-mean FWI, i.e.
+    a perfect five-day danger forecast - so the sweep over degraded FWI
+    forecasts at the end is the fairer operational comparison.
+    """
+    import glob
+    import json
+
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+
+    fires = _load_fires(cfg)
+    daily = fires.groupby("date").agg(n=("codigo", "size"))
+    path = _regime_state_path(cfg, args.domain, args.k or 4)
+    with open(path, "rb") as fh:
+        st = pickle.load(fh)
+
+    values, fwi_times = download.open_fwi(
+        sorted(glob.glob(os.path.join(cfg.data_dir, "fwi_*.nc"))))
+    fwi = pd.Series(values.mean(axis=1), index=pd.to_datetime(fwi_times))
+
+    times = pd.to_datetime(st["times"])
+    keep = (times.isin(fwi.index)
+            & (times.year >= fires.date.dt.year.min())
+            & (times.year <= fires.date.dt.year.max()))
+    times, labels = times[keep], st["labels"][keep]
+    fwi_daily = fwi.reindex(times).values
+    d = pd.DataFrame(index=times).join(daily).fillna({"n": 0})
+    severe = (d.n.values >= 3).astype(float)
+    season = times.year.values
+
+    h = args.horizon
+    origins, wsev = fire_link.forward_window(severe, season, h)
+    _, wfwi = fire_link.forward_window(fwi_daily, season, h)
+    event = wsev > 0
+    yrs = season[origins]
+    hold = labels[origins] == args.regime
+
+    def loyo(X):
+        p = np.full(len(event), np.nan)
+        for y in np.unique(yrs):
+            tr, te = yrs != y, yrs == y
+            m = LogisticRegression(max_iter=1000).fit(X[tr], event[tr])
+            p[te] = m.predict_proba(X[te])[:, 1]
+        return p
+
+    z = ((wfwi - wfwi.mean()) / wfwi.std())[:, None]
+    p_fwi = loyo(z)
+    p_both = loyo(np.c_[z, hold.astype(float)])
+
+    out = {"horizon": h, "regime": args.regime, "n_origins": int(len(event)),
+           "base_rate": float(event.mean()),
+           "years": [int(yrs.min()), int(yrs.max())]}
+
+    print(f"=== cost-loss value: {h}-day readiness decision ===")
+    print(f"{len(event)} origin days, {out['years'][0]}-{out['years'][1]}. "
+          f"Event = at least one severe fire day in the next {h} days; "
+          f"base rate {event.mean():.3f}.")
+    print(f"  P(event | regime {args.regime}) {event[hold].mean():.3f}   "
+          f"otherwise {event[~hold].mean():.3f}   "
+          f"ratio {event[hold].mean() / event[~hold].mean():.2f}")
+
+    full = LogisticRegression(max_iter=1000).fit(
+        np.c_[z, hold.astype(float)], event)
+    coef = float(full.coef_[0][1])
+    out["conditional_odds_ratio"] = float(np.exp(coef))
+    print(f"  conditional on continuous FWI the regime term is "
+          f"{coef:+.3f} log-odds (OR {np.exp(coef):.2f}) - a real effect")
+
+    out["auc"] = {"fwi": float(roc_auc_score(event, p_fwi)),
+                  "fwi_regime": float(roc_auc_score(event, p_both))}
+    gain_auc = out["auc"]["fwi_regime"] - out["auc"]["fwi"]
+    print(f"\n  AUC   FWI alone {out['auc']['fwi']:.3f}   "
+          f"+regime {out['auc']['fwi_regime']:.3f}   gain {gain_auc:+.3f}")
+
+    alphas = np.array([.05, .10, .15, .20, .25, .30, .35, .40, .50])
+    out["curve"] = []
+    print("\n  value: 0 is the better climatological rule, 1 a perfect forecast")
+    print("  C/L    FWI only   FWI+regime    gain")
+    for a in alphas:
+        vf = fire_link.cost_loss_value(p_fwi, event, a)
+        vb = fire_link.cost_loss_value(p_both, event, a)
+        out["curve"].append({"alpha": float(a), "v_fwi": vf, "v_both": vb,
+                             "gain": vb - vf})
+        print(f"  {a:.2f}   {vf:8.3f}   {vb:9.3f}  {vb - vf:+7.3f}")
+
+    # The baseline above knows the future FWI exactly. Degrade it towards what
+    # a real five-day danger forecast looks like and the regime gets more room.
+    rng = np.random.default_rng(cfg.cluster.random_state)
+    out["degraded_fwi"] = []
+    print("\n  with a degraded FWI forecast (the fairer comparison)")
+    print("  rho    AUC(FWI)  AUC(+regime)   gain    value gain @ C/L 0.25")
+    for rho in (1.0, 0.9, 0.8, 0.7, 0.6):
+        af, ab, gains = [], [], []
+        for _ in range(max(args.n_draws // 2, 1)):
+            f = wfwi if rho == 1.0 else fire_link.degrade_series(wfwi, rho, rng)
+            zz = ((f - f.mean()) / f.std())[:, None]
+            pf, pb = loyo(zz), loyo(np.c_[zz, hold.astype(float)])
+            af.append(roc_auc_score(event, pf))
+            ab.append(roc_auc_score(event, pb))
+            gains.append(fire_link.cost_loss_value(pb, event, .25)
+                         - fire_link.cost_loss_value(pf, event, .25))
+        row = {"rho": rho, "auc_fwi": float(np.mean(af)),
+               "auc_both": float(np.mean(ab)),
+               "value_gain": float(np.mean(gains))}
+        out["degraded_fwi"].append(row)
+        print(f"  {rho:.1f}     {row['auc_fwi']:.3f}     {row['auc_both']:.3f}"
+              f"      {row['auc_both'] - row['auc_fwi']:+.3f}        "
+              f"{row['value_gain']:+.3f}")
+
+    dest = os.path.join(cfg.out_dir, "cost_loss.json")
+    with open(dest, "w") as fh:
+        json.dump(out, fh, indent=2)
+    print(f"\nwrote {dest}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", required=True,
                     choices=["download", "regimes", "compare", "fires",
-                             "forecast", "lead", "maps", "cwt"])
+                             "forecast", "lead", "maps", "cwt", "value"])
     ap.add_argument("--domain", default="pt_tuned", choices=list(DOMAINS))
     ap.add_argument("--k", type=int, default=None)
     ap.add_argument("--select-k", action="store_true")
@@ -758,7 +892,8 @@ def main():
     {"download": step_download, "regimes": step_regimes,
      "compare": step_compare, "fires": step_fires,
      "forecast": step_forecast, "lead": step_lead,
-     "maps": step_maps, "cwt": step_cwt}[args.step](cfg, args)
+     "maps": step_maps, "cwt": step_cwt,
+     "value": step_value}[args.step](cfg, args)
 
 
 if __name__ == "__main__":
