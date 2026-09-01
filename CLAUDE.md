@@ -45,7 +45,17 @@ posture, not a dispatch decision.
 | Forecast penalty | done — `--step forecast` |
 | Free lead + FWI increment | done — `--step lead` |
 | Composite Z500 maps | done — `--step maps`; they falsified half the domain rationale |
+| CWT benchmark | done — `--step cwt`; **the k-means partition loses it** |
 | Selection-bias treatment | **not done** — regimes were chosen by max odds ratio |
+
+**The k-means partition loses to a 1970s finite-difference scheme.** `--step
+cwt` scores Jenkinson-Collison types against the fitted regimes on the same
+days, outcome and folds: BSS 0.0061 vs 0.0101, AUC 0.532 vs 0.593, and the gap
+*widens* when restricted to the days the regimes classify. Not a class-count
+artefact — the ten-type collapse wins too. Caveat that keeps it from being
+decisive: the published scheme uses MSLP and this ran on Z500, which is a
+severe deviation (W is 38.8% of days here vs 3.7% in Carmo). **Get MSLP before
+defending the EOF/k-means machinery.**
 
 The headline result: regime 0 halves the severe-fire-day rate over the
 following five days, and it survives stratification by FWI (0.49 in the top
@@ -62,6 +72,7 @@ regimes_pt/download.py     CDS retrieval — ERA5 Z500, CEMS FWI reanalysis
 regimes_pt/preprocess.py   harmonic climatology, detrend, area weight, EOF
 regimes_pt/cluster.py      k-means, classifiability index, assignment, transitions
 regimes_pt/fire_link.py    regionalisation, composites, odds ratios, CV skill
+regimes_pt/cwt.py          Jenkinson-Collison weather types — the real benchmark
 regimes_pt/plots.py        composite maps — optional, needs matplotlib + cartopy
 run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead | maps
 tests/test_units.py        invariant tests, no network, ~10 s
@@ -90,6 +101,7 @@ python run_prototype.py --step fires                             # needs data/oc
 python run_prototype.py --step forecast                          # how much skill it needs
 python run_prototype.py --step lead                              # how much lead is free
 python run_prototype.py --step maps                              # composites; needs cartopy
+python run_prototype.py --step cwt                               # benchmark vs Trigo CWT
 ```
 
 CDS credentials go in `~/.cdsapirc`, never in the repo.
@@ -179,12 +191,6 @@ them produces output that still looks like weather and is wrong.
 - **Live forecast path.** Hindcast only. Would need licensed ECMWF regime
   probabilities, or a GEFS/IFS open-data Z500 pull projected onto fitted
   centroids via `cluster.project_and_assign`.
-- **The CWT benchmark.** `--step compare` scores `pt_tuned` against
-  `canonical_summer`, a partition built for the Euro-Atlantic winter. The
-  benchmark that would actually settle anything is NE+E circulation-weather-type
-  frequency (Trigo & DaCâmara 2000, as used by Carmo et al. 2022): cheap,
-  validated for this region, and what IPMA would reach for. See `docs/README.md`.
-
 - **Regionalised composites.** `--step maps` draws the national picture only.
   Per-region composites would test whether the North/Centre signal and the
   (much thinner) South signal come from the same circulation.
