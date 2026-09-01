@@ -25,6 +25,13 @@ out/*
 *.pkl
 *.zip
 
+# Papers under docs/ are third-party and stay local. Trigo and DaCamara (2000)
+# is all-rights-reserved; Carmo et al. (2022) is CC BY-NC-ND, and a text
+# extraction is plausibly the derivative that licence excludes. This repo is
+# public, so only docs/README.md - our own notes and the citations - is tracked.
+docs/*.txt
+docs/*.pdf
+
 # Python
 __pycache__/
 *.py[cod]

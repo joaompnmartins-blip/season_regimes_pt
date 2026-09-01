@@ -16,7 +16,10 @@ low in the composite total height field, at 42°N 14°W. The NW Africa ridge is
 not: that box averages −25.9 gpm, the wrong sign. The ridge is at 55°N 14°W,
 due north of the low, which is a blocking ridge with a cut-off low beneath it
 — the textbook way cut-off lows form. Do not go looking for the subtropical
-ridge; it was design intent, never a finding.
+ridge; it was design intent, never a finding. Carmo et al. (2022) reach the
+same picture independently — fire-driving anticyclones "between the Azores and
+the British Isles", plus a rarer "inverse omega" with a closed low off the
+Portuguese west coast — and never place the ridge over NW Africa either.
 
 It is **not** a fire-probability product. The defensible output is a
 regime-conditioned **odds ratio** — "under regime X, Beira Interior has 2.8×
@@ -63,7 +66,15 @@ regimes_pt/plots.py        composite maps — optional, needs matplotlib + carto
 run_prototype.py           CLI: download | regimes | compare | fires | forecast | lead | maps
 tests/test_units.py        invariant tests, no network, ~10 s
 tests/test_synthetic.py    ground-truth end-to-end, no network, ~3 min
+docs/README.md             related work — read before claiming novelty
 ```
+
+`docs/README.md` matters more than its size suggests. Carmo et al. (2022) is
+the same question on the same country with a different method, and it
+independently reaches the composite result in `--step maps`. It also names two
+live problems: regime 2 may be blending two synoptic pathways that IPMA keeps
+separate, and `canonical_summer` is a straw-man benchmark next to NE+E CWT
+frequency. The papers themselves are untracked for licensing reasons.
 
 ## Commands
 
@@ -168,6 +179,12 @@ them produces output that still looks like weather and is wrong.
 - **Live forecast path.** Hindcast only. Would need licensed ECMWF regime
   probabilities, or a GEFS/IFS open-data Z500 pull projected onto fitted
   centroids via `cluster.project_and_assign`.
+- **The CWT benchmark.** `--step compare` scores `pt_tuned` against
+  `canonical_summer`, a partition built for the Euro-Atlantic winter. The
+  benchmark that would actually settle anything is NE+E circulation-weather-type
+  frequency (Trigo & DaCâmara 2000, as used by Carmo et al. 2022): cheap,
+  validated for this region, and what IPMA would reach for. See `docs/README.md`.
+
 - **Regionalised composites.** `--step maps` draws the national picture only.
   Per-region composites would test whether the North/Centre signal and the
   (much thinner) South signal come from the same circulation.
