@@ -191,14 +191,23 @@ or simply amplitude within one pattern. Sub-cluster the regime-2 days and check
 whether the two sub-composites reproduce their NE/E and C panels; if they do,
 four regimes is too few for the elevating side however well it scores.
 
-### The benchmark is wrong
+### The benchmark tests the domain but not the method
 
-We currently compare `pt_tuned` against `canonical_summer` — a partition
-designed for the Euro-Atlantic winter. That is a weak control. The real question
-is whether an EOF/k-means partition beats **NE + E CWT frequency**, which is
-cheap to compute, already validated for this region, and what IPMA would
-actually reach for. Until that comparison exists, "the tuned domain does better"
-is a claim against a straw man.
+An earlier version of this file called `canonical_summer` "a partition designed
+for the Euro-Atlantic winter" and therefore a straw man. **That was wrong.**
+`config.py` follows Cassou et al. (2005), which is specifically the *summer*
+Euro-Atlantic partition, and it is a legitimate seasonal baseline.
+
+The real limitation is narrower and still worth fixing: `canonical_summer` and
+`pt_tuned` are the same method — EOF truncation plus k-means — differing only in
+domain. Comparing them tests the domain choice and nothing else. A different
+*method* family is needed to test whether the machinery earns its complexity,
+and the obvious candidate is the Jenkinson-Collison scheme these papers use,
+which is cheap, validated for this region, and what IPMA would reach for.
+
+That benchmark now exists as `--step cwt`, and **the k-means partition loses
+it** — see the top of `CLAUDE.md`. The caveat there is load-bearing: it ran on
+Z500 rather than MSLP.
 
 ### The precursor is two days, and it corroborates the *weak* half of `--step lead`
 
@@ -235,3 +244,61 @@ them. It is neither confirmed nor contradicted there.
 - No trend in pattern frequency since 1980 is a useful negative: it means our
   detrending invariant is about the thermal expansion of heights, not about
   drift in regime occupancy.
+
+---
+
+## The wider literature — leads, not established facts
+
+The following came from a survey done outside this repository and **the
+citations have not been checked against the papers themselves**. That caution is
+not boilerplate: everything above the line was rewritten once already because it
+had been written from text extractions rather than from the figures, and a claim
+about the precursor lead turned out to be wrong. Treat this section as a
+to-verify list.
+
+**The argument has three legs and no bridge.** The literature supports
+(1) regimes are a source of extended-range predictability, with an operational
+limit around 14–20 days rather than truly seasonal; (2) circulation types
+discriminate Iberian fire danger — Pereira et al. (2005), the Trigo scheme,
+Carmo et al. (2022), plus fire-weather-type classifications in Ruffault et al.
+(2020) and Rodrigues et al. (2020); and (3) regime-conditioned forecasting adds
+value over forecasting the impact variable directly, and seasonal fire services
+are already operating (Turco et al. with the Catalan SPIF). Nothing found closes
+the loop: forecast regime frequencies at S2S lead, demonstrated against a named
+Portuguese prevention decision. This project is that bridge, which is a reason
+to build it and also a reason not to claim precedent for it.
+
+**Tension worth resolving: Pereira et al. (2005).** They describe large
+Portuguese summer fires under a ridge over Iberia *with* strongly meridional
+flow advecting hot dry air from North Africa. Our regime 1 has the highest
+heights over Portugal of the four (+40.4 gpm relative to the domain) and is
+fire-**neutral** (OR 1.06) — and it is the only regime whose severe-day rate is
+flat across height terciles (1.04, against 5.1 for regime 2). That is what a
+conjunction looks like when only half of it is present: ridge without advection.
+
+An attempt to test it here failed for a reason worth recording. Splitting each
+regime by the sign of the southerly flow index gives nothing useful — regime 2's
+southerly days run at 0.154 against 0.186 for its northerly days, the wrong
+direction — because the indices are computed on Z500 and Pereira's claim is
+about *surface* south-easterly advection. Upper-level flow direction is not a
+proxy for it. The test needs MSLP.
+
+**Two questions to check that ought to have answers already:** whether
+Ruffault's fire-weather types have ever been mapped onto Euro-Atlantic regime
+states, and whether Barbero or Moron have done regime-frequency to burned-area
+work for France that could be mirrored here.
+
+### What this changes about priorities
+
+**MSLP is now the bottleneck for three separate things**, which is the strongest
+argument yet for retrieving it: the CWT benchmark is currently run on the wrong
+field, the Pereira conjunction cannot be tested without surface flow, and any
+comparison against published CWT frequencies is meaningless until the
+classification matches the published one.
+
+**Cost–loss is the missing analysis, and it is cheap.** Every number in this
+project is a rate or a ratio. An operational audience decides on expected
+expense, and the extreme-precipitation work cited above makes its case on
+cost–loss value at low ratios. The five-day hold signal has all the inputs
+needed — hit rate, false-alarm rate, base rate — and converting it would say
+whether a 0.47 ratio is worth acting on far better than the ratio itself does.
